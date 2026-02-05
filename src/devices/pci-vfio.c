@@ -248,7 +248,7 @@ static void vfio_enable_irqs(vfio_func_t* vfio)
         vfio_irq_t* irq = vector_at(vfio->irqs, i);
         irq->pci_func   = vfio->pci_func;
         irq->running    = true;
-        irq->thread     = thread_create(vfio_irq_thread, irq);
+        irq->thread     = rvvm_thread_create(vfio_irq_thread, irq);
     }
 }
 

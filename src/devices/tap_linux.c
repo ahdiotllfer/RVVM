@@ -125,7 +125,7 @@ void tap_attach(tap_dev_t* tap, const tap_net_dev_t* net_dev)
     if (tap->net.feed_rx == NULL) {
         tap->net = *net_dev;
         // Run TAP thread
-        tap->thread = thread_create(tap_thread, tap);
+        tap->thread = rvvm_thread_create(tap_thread, tap);
     }
 }
 
@@ -159,6 +159,57 @@ bool tap_portfwd(tap_dev_t* tap, const char* fwd)
 {
     UNUSED(tap); UNUSED(fwd);
     return false;
+}
+
+bool tap_reinit(tap_dev_t* tap)
+{
+    if (!tap) {
+        return false;
+    }
+
+    if (tap->thread) {
+        close(tap->shut[1]);
+        thread_join(tap->thread);
+        tap->thread = NULL;
+    }
+
+    if (tap->fd >= 0) {
+        close(tap->fd);
+        tap->fd = -1;
+    }
+    close(tap->shut[0]);
+
+    tap->fd = open("/dev/net/tun", O_RDWR);
+    if (tap->fd < 0) {
+        return false;
+    }
+
+    struct ifreq ifr = {0};
+    rvvm_strlcpy(ifr.ifr_name, "tap0", sizeof(ifr.ifr_name));
+    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+    if (ioctl(tap->fd, TUNSETIFF, &ifr) < 0) {
+        close(tap->fd);
+        tap->fd = -1;
+        return false;
+    }
+    rvvm_strlcpy(tap->name, ifr.ifr_name, sizeof(tap->name));
+
+    if (pipe(tap->shut) < 0) {
+        close(tap->fd);
+        tap->fd = -1;
+        return false;
+    }
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    ioctl(sock, SIOCGIFFLAGS, &ifr);
+    ifr.ifr_flags |= IFF_UP;
+    ioctl(sock, SIOCSIFFLAGS, &ifr);
+    close(sock);
+
+    if (tap->net.feed_rx) {
+        tap->thread = rvvm_thread_create(tap_thread, tap);
+    }
+    return tap->thread != NULL;
 }
 
 void tap_close(tap_dev_t* tap)

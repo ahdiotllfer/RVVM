@@ -22,7 +22,7 @@ typedef struct thread_ctx thread_ctx_t;
 typedef void* (*thread_func_t)(void*);
 
 thread_ctx_t* thread_create_ex(thread_func_t func, void* arg, uint32_t stack_size);
-thread_ctx_t* thread_create(thread_func_t func, void* arg);
+thread_ctx_t* rvvm_thread_create(thread_func_t func, void* arg);
 bool          thread_join(thread_ctx_t* thread);
 
 /*

@@ -605,7 +605,7 @@ static gdb_server_t* gdbstub_create(const char* bind)
         return NULL;
     }
 
-    server->thread = thread_create(gdbstub_thread, server);
+    server->thread = rvvm_thread_create(gdbstub_thread, server);
 
     return server;
 }

@@ -832,9 +832,243 @@ static void pci_bus_remove(rvvm_mmio_dev_t* ecam)
     free(bus);
 }
 
+static void pci_bus_suspend(rvvm_mmio_dev_t* ecam, rvvm_state_t* state)
+{
+    pci_bus_t* bus = ecam->data;
+    if (!bus) {
+        return;
+    }
+
+    rvvm_state_write_u32(state, 1);
+
+    uint32_t dev_count = 0;
+    vector_foreach (bus->dev, i) {
+        if (vector_at(bus->dev, i)) {
+            dev_count++;
+        }
+    }
+    rvvm_state_write_u32(state, dev_count);
+
+    vector_foreach (bus->dev, i) {
+        pci_dev_t* dev = vector_at(bus->dev, i);
+        if (!dev) {
+            continue;
+        }
+
+        rvvm_state_write_u32(state, dev->addr);
+
+        uint32_t func_mask = 0;
+        for (size_t func_id = 0; func_id < PCI_DEV_FUNCS; ++func_id) {
+            if (dev->func[func_id]) {
+                func_mask |= (1U << func_id);
+            }
+        }
+        rvvm_state_write_u32(state, func_mask);
+
+        for (size_t func_id = 0; func_id < PCI_DEV_FUNCS; ++func_id) {
+            pci_func_t* func = dev->func[func_id];
+            if (!func) {
+                continue;
+            }
+
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->command));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->status));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->irq_line));
+
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->bridge_io));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->bridge_mem));
+
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->pm_csr));
+
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_control));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_addr_low));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_addr_high));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_data));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_mask));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msi_pending));
+
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msix_control));
+            rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msix_bar));
+            for (size_t k = 0; k < PCI_MSIX_BAR_SIZE; ++k) {
+                rvvm_state_write_u32(state, atomic_load_uint32_relax(&func->msix[k]));
+            }
+
+            for (size_t bar_id = 0; bar_id < PCI_FUNC_BARS; ++bar_id) {
+                uint32_t present = func->bar[bar_id] ? 1U : 0U;
+                rvvm_state_write_u32(state, present);
+                if (present) {
+                    rvvm_state_write_u64(state, (uint64_t)func->bar[bar_id]->addr);
+                    rvvm_state_write_u64(state, (uint64_t)func->bar[bar_id]->size);
+                }
+            }
+
+            {
+                uint32_t present = func->expansion_rom ? 1U : 0U;
+                rvvm_state_write_u32(state, present);
+                if (present) {
+                    rvvm_state_write_u64(state, (uint64_t)func->expansion_rom->addr);
+                    rvvm_state_write_u64(state, (uint64_t)func->expansion_rom->size);
+                }
+            }
+        }
+    }
+}
+
+static void pci_bus_resume(rvvm_mmio_dev_t* ecam, rvvm_state_t* state)
+{
+    pci_bus_t* bus = ecam->data;
+    if (!bus) {
+        return;
+    }
+
+    uint32_t version = 0;
+    if (!rvvm_state_read_u32(state, &version) || version != 1) {
+        rvvm_state_fail(state);
+        return;
+    }
+
+    uint32_t dev_count = 0;
+    if (!rvvm_state_read_u32(state, &dev_count)) {
+        rvvm_state_fail(state);
+        return;
+    }
+
+    for (uint32_t i = 0; i < dev_count; ++i) {
+        uint32_t bus_addr = 0;
+        uint32_t func_mask = 0;
+        if (!rvvm_state_read_u32(state, &bus_addr) || !rvvm_state_read_u32(state, &func_mask)) {
+            rvvm_state_fail(state);
+            return;
+        }
+
+        pci_dev_t* dev = pci_get_bus_device(bus, bus_addr);
+        if (!dev || dev->addr != bus_addr) {
+            rvvm_state_fail(state);
+            return;
+        }
+
+        for (size_t func_id = 0; func_id < PCI_DEV_FUNCS; ++func_id) {
+            if (!(func_mask & (1U << func_id))) {
+                continue;
+            }
+
+            pci_func_t* func = pci_get_device_func(dev, func_id);
+            if (!func) {
+                rvvm_state_fail(state);
+                return;
+            }
+
+            uint32_t command = 0;
+            uint32_t status = 0;
+            uint32_t irq_line = 0;
+            uint32_t bridge_io = 0;
+            uint32_t bridge_mem = 0;
+            uint32_t pm_csr = 0;
+
+            uint32_t msi_control = 0;
+            uint32_t msi_addr_low = 0;
+            uint32_t msi_addr_high = 0;
+            uint32_t msi_data = 0;
+            uint32_t msi_mask = 0;
+            uint32_t msi_pending = 0;
+
+            uint32_t msix_control = 0;
+            uint32_t msix_bar = 0;
+
+            if (!rvvm_state_read_u32(state, &command) || !rvvm_state_read_u32(state, &status) || !rvvm_state_read_u32(state, &irq_line)
+             || !rvvm_state_read_u32(state, &bridge_io) || !rvvm_state_read_u32(state, &bridge_mem) || !rvvm_state_read_u32(state, &pm_csr)
+             || !rvvm_state_read_u32(state, &msi_control) || !rvvm_state_read_u32(state, &msi_addr_low)
+             || !rvvm_state_read_u32(state, &msi_addr_high) || !rvvm_state_read_u32(state, &msi_data) || !rvvm_state_read_u32(state, &msi_mask)
+             || !rvvm_state_read_u32(state, &msi_pending) || !rvvm_state_read_u32(state, &msix_control) || !rvvm_state_read_u32(state, &msix_bar)) {
+                rvvm_state_fail(state);
+                return;
+            }
+
+            atomic_store_uint32_relax(&func->command, command);
+            atomic_store_uint32_relax(&func->status, status);
+            atomic_store_uint32_relax(&func->irq_line, irq_line);
+
+            atomic_store_uint32_relax(&func->bridge_io, bridge_io);
+            atomic_store_uint32_relax(&func->bridge_mem, bridge_mem);
+
+            atomic_store_uint32_relax(&func->pm_csr, pm_csr);
+
+            atomic_store_uint32_relax(&func->msi_control, msi_control);
+            atomic_store_uint32_relax(&func->msi_addr_low, msi_addr_low);
+            atomic_store_uint32_relax(&func->msi_addr_high, msi_addr_high);
+            atomic_store_uint32_relax(&func->msi_data, msi_data);
+            atomic_store_uint32_relax(&func->msi_mask, msi_mask);
+            atomic_store_uint32_relax(&func->msi_pending, msi_pending);
+
+            atomic_store_uint32_relax(&func->msix_control, msix_control);
+            atomic_store_uint32_relax(&func->msix_bar, msix_bar);
+            for (size_t k = 0; k < PCI_MSIX_BAR_SIZE; ++k) {
+                uint32_t v = 0;
+                if (!rvvm_state_read_u32(state, &v)) {
+                    rvvm_state_fail(state);
+                    return;
+                }
+                atomic_store_uint32_relax(&func->msix[k], v);
+            }
+
+            for (size_t bar_id = 0; bar_id < PCI_FUNC_BARS; ++bar_id) {
+                uint32_t present = 0;
+                if (!rvvm_state_read_u32(state, &present)) {
+                    rvvm_state_fail(state);
+                    return;
+                }
+                if (!!present != !!func->bar[bar_id]) {
+                    rvvm_state_fail(state);
+                    return;
+                }
+                if (present) {
+                    uint64_t addr = 0;
+                    uint64_t size = 0;
+                    if (!rvvm_state_read_u64(state, &addr) || !rvvm_state_read_u64(state, &size)) {
+                        rvvm_state_fail(state);
+                        return;
+                    }
+                    if ((uint64_t)func->bar[bar_id]->size != size) {
+                        rvvm_state_fail(state);
+                        return;
+                    }
+                    func->bar[bar_id]->addr = (rvvm_addr_t)addr;
+                }
+            }
+
+            {
+                uint32_t present = 0;
+                if (!rvvm_state_read_u32(state, &present)) {
+                    rvvm_state_fail(state);
+                    return;
+                }
+                if (!!present != !!func->expansion_rom) {
+                    rvvm_state_fail(state);
+                    return;
+                }
+                if (present) {
+                    uint64_t addr = 0;
+                    uint64_t size = 0;
+                    if (!rvvm_state_read_u64(state, &addr) || !rvvm_state_read_u64(state, &size)) {
+                        rvvm_state_fail(state);
+                        return;
+                    }
+                    if ((uint64_t)func->expansion_rom->size != size) {
+                        rvvm_state_fail(state);
+                        return;
+                    }
+                    func->expansion_rom->addr = (rvvm_addr_t)addr;
+                }
+            }
+        }
+    }
+}
+
 static const rvvm_mmio_type_t pci_bus_type = {
     .name   = "pci_bus",
     .remove = pci_bus_remove,
+    .suspend = pci_bus_suspend,
+    .resume = pci_bus_resume,
 };
 
 PUBLIC pci_bus_t* pci_bus_init(rvvm_machine_t* machine,                   //
