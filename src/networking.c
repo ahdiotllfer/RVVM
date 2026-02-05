@@ -1087,7 +1087,7 @@ net_sock_t* net_udp_bind(const net_addr_t* addr)
     return NULL;
 }
 
-size_t net_udp_send(net_sock_t* sock, const void* buffer, size_t size, const net_addr_t* addr)
+int32_t net_udp_send(net_sock_t* sock, const void* buffer, size_t size, const net_addr_t* addr)
 {
     if (likely(sock)) {
         int ret = 0;
@@ -1102,11 +1102,12 @@ size_t net_udp_send(net_sock_t* sock, const void* buffer, size_t size, const net
             ret = sendto(sock->fd, buffer, size, 0, (struct sockaddr*)&sock_addr, sizeof(sock_addr));
 #endif
         }
-        if (ret > 0) {
+        if (ret >= 0) {
             return ret;
         }
+        return net_last_error();
     }
-    return 0;
+    return NET_ERR_RESET;
 }
 
 int32_t net_udp_recv(net_sock_t* sock, void* buffer, size_t size, net_addr_t* addr)
@@ -1173,7 +1174,7 @@ net_sock_t* net_icmp_bind(const net_addr_t* addr)
     return NULL;
 }
 
-size_t net_icmp_send(net_sock_t* sock, const void* buffer, size_t size, const net_addr_t* addr)
+int32_t net_icmp_send(net_sock_t* sock, const void* buffer, size_t size, const net_addr_t* addr)
 {
     return net_udp_send(sock, buffer, size, addr);
 }

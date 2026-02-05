@@ -731,7 +731,7 @@ static bool x11_global_init(void)
             rvvm_error("Failed to connect to X11 Display: Error code %d", error);
             return false;
         }
-        x11_thread = thread_create(x11_event_worker, (void*)(size_t)ConnectionNumber(x11_display));
+        x11_thread = rvvm_thread_create(x11_event_worker, (void*)(size_t)ConnectionNumber(x11_display));
     }
     return !!x11_thread;
 }

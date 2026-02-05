@@ -196,10 +196,62 @@ static void ns16550a_remove(rvvm_mmio_dev_t* dev)
     free(uart);
 }
 
+static void ns16550a_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    ns16550a_dev_t* uart = dev->data;
+    if (!uart) {
+        return;
+    }
+
+    rvvm_state_write_u32(state, 1);
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->ier));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->lcr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->mcr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->scr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->dll));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&uart->dlm));
+}
+
+static void ns16550a_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    ns16550a_dev_t* uart = dev->data;
+    if (!uart) {
+        return;
+    }
+
+    uint32_t version = 0;
+    uint32_t ier = 0;
+    uint32_t lcr = 0;
+    uint32_t mcr = 0;
+    uint32_t scr = 0;
+    uint32_t dll = 0;
+    uint32_t dlm = 0;
+    if (!rvvm_state_read_u32(state, &version) || version != 1 || !rvvm_state_read_u32(state, &ier) ||
+        !rvvm_state_read_u32(state, &lcr) || !rvvm_state_read_u32(state, &mcr) || !rvvm_state_read_u32(state, &scr) ||
+        !rvvm_state_read_u32(state, &dll) || !rvvm_state_read_u32(state, &dlm)) {
+        rvvm_state_fail(state);
+        return;
+    }
+
+    atomic_store_uint32_relax(&uart->ier, ier);
+    atomic_store_uint32_relax(&uart->lcr, lcr);
+    atomic_store_uint32_relax(&uart->mcr, mcr);
+    atomic_store_uint32_relax(&uart->scr, scr);
+    atomic_store_uint32_relax(&uart->dll, dll);
+    atomic_store_uint32_relax(&uart->dlm, dlm);
+
+    if (uart->chardev) {
+        ns16550a_poll(uart);
+    }
+    ns16550a_update_irq(uart);
+}
+
 static const rvvm_mmio_type_t ns16550a_dev_type = {
     .name   = "ns16550a",
     .update = ns16550a_update,
     .remove = ns16550a_remove,
+    .suspend = ns16550a_suspend,
+    .resume = ns16550a_resume,
 };
 
 PUBLIC rvvm_mmio_dev_t* ns16550a_init(rvvm_machine_t* machine, chardev_t* chardev, rvvm_addr_t addr, rvvm_intc_t* intc,

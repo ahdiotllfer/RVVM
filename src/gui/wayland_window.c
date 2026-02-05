@@ -904,7 +904,7 @@ static bool wayland_global_init(void)
     }
 
     // Launch the event thread
-    wl_thread = thread_create(wl_event_worker, NULL);
+    wl_thread = rvvm_thread_create(wl_event_worker, NULL);
 
     return true;
 }
