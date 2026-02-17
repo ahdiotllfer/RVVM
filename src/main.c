@@ -46,6 +46,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "devices/sound-hda.h"
 #include "devices/syscon.h"
 #include "devices/usb-xhci.h"
+#include "devices/virtio-fs.h"
 
 #include "gui/gui_window.h"
 
@@ -198,6 +199,7 @@ static void rvvm_print_help(void)
         "    -vfio_pci   ...  PCI passthrough via VFIO (Example: 00:02.0), needs root\n"
         "    -nvme       ...  Explicitly attach storage image as NVMe device\n"
         "    -ata        ...  Explicitly attach storage image as ATA (IDE) device\n"
+        "    -virtio-fs  ...  Attach virtio-fs shared directory (tag: share)\n"
         "    -nogui           Disable display GUI\n"
         "    -nosound         Disable sound support\n"
         "    -nonet           Disable networking\n"
@@ -237,6 +239,7 @@ static bool rvvm_cli_configure(rvvm_machine_t* machine, const char* bios, tap_de
     int         arg_iter = 1;
     const char* arg_name = NULL;
     const char* arg_val  = NULL;
+    uint32_t    virtio_fs_idx = 0;
     while ((arg_name = rvvm_next_arg(&arg_val, &arg_iter))) {
         if (arg_val) {
             if (rvvm_strcmp(arg_name, "i") || rvvm_strcmp(arg_name, "image") || rvvm_strcmp(arg_name, "nvme")) {
@@ -247,6 +250,18 @@ static bool rvvm_cli_configure(rvvm_machine_t* machine, const char* bios, tap_de
             } else if (rvvm_strcmp(arg_name, "ata")) {
                 if (!ata_init_auto(machine, arg_val, true)) {
                     rvvm_error("Failed to attach image \"%s\"", arg_val);
+                    return false;
+                }
+            } else if (rvvm_strcmp(arg_name, "virtio-fs") || rvvm_strcmp(arg_name, "virtio_fs")) {
+                char tag[32] = {0};
+                if (!virtio_fs_idx) {
+                    rvvm_strlcpy(tag, "share", sizeof(tag));
+                } else {
+                    rvvm_snprintf(tag, sizeof(tag), "share%u", virtio_fs_idx);
+                }
+                virtio_fs_idx++;
+                if (!virtio_fs_init_auto(machine, tag, arg_val)) {
+                    rvvm_error("Failed to attach virtio-fs shared directory \"%s\"", arg_val);
                     return false;
                 }
             } else if (rvvm_strcmp(arg_name, "serial")) {
