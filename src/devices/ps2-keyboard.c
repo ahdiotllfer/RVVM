@@ -16,6 +16,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "spinlock.h"
 #include "utils.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 PUSH_OPTIMIZATION_SIZE
 
 #define PS2_CMD_RESET                  0xFF
@@ -57,6 +62,107 @@ struct hid_keyboard {
 
     ringbuf_t cmdbuf;
 };
+
+__attribute__((weak)) void rvvm_ios_uart_debug_print(const char* s);
+
+static void ps2_keyboard_uart_print(const char* s)
+{
+    if (!s) {
+        return;
+    }
+    if (rvvm_ios_uart_debug_print) {
+        rvvm_ios_uart_debug_print(s);
+        return;
+    }
+    fputs(s, stdout);
+    fflush(stdout);
+}
+
+static bool ps2_keyboard_debug_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled >= 0) {
+        return enabled != 0;
+    }
+    const char* env = getenv("RVVM_PS2KBD_DEBUG");
+    if (env && *env) {
+        enabled = (*env != '0');
+        return enabled != 0;
+    }
+
+    if (rvvm_has_arg("ps2kbd_nodebug") || rvvm_has_arg("ps2kbd-nodebug") || rvvm_has_arg("ps2_nodebug") || rvvm_has_arg("ps2-nodbg")) {
+        enabled = 0;
+        return false;
+    }
+
+    if (rvvm_has_arg("ps2kbd_debug") || rvvm_has_arg("ps2kbd-debug") || rvvm_has_arg("ps2_debug") || rvvm_has_arg("ps2dbg") ||
+        rvvm_has_arg("kbd_debug") || rvvm_has_arg("input_debug")) {
+        enabled = 1;
+        return true;
+    }
+
+    if (rvvm_ios_uart_debug_print) {
+        enabled = 1;
+        return true;
+    }
+
+    enabled = !rvvm_has_arg("nogui");
+    return enabled != 0;
+}
+
+static uint32_t ps2_keyboard_debug_budget = 5000;
+
+static void ps2_keyboard_dbgf(const char* fmt, ...)
+{
+    if (!ps2_keyboard_debug_enabled() || ps2_keyboard_debug_budget == 0) {
+        return;
+    }
+    ps2_keyboard_debug_budget--;
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    size_t len = strlen(buf);
+    if (len + 1 < sizeof(buf)) {
+        buf[len]     = '\n';
+        buf[len + 1] = '\0';
+    } else if (len && buf[len - 1] != '\n') {
+        buf[sizeof(buf) - 2] = '\n';
+        buf[sizeof(buf) - 1] = '\0';
+    }
+    ps2_keyboard_uart_print(buf);
+}
+
+static void ps2_keyboard_dbg_bytes(const char* prefix, const uint8_t* bytes, size_t len)
+{
+    if (!ps2_keyboard_debug_enabled() || ps2_keyboard_debug_budget == 0) {
+        return;
+    }
+    ps2_keyboard_debug_budget--;
+
+    char buf[256];
+    int off = snprintf(buf, sizeof(buf), "ps2-kbd %s:", prefix ? prefix : "");
+    if (off < 0) {
+        return;
+    }
+    size_t w = (size_t)off;
+    for (size_t i = 0; i < len && w + 4 < sizeof(buf); ++i) {
+        int n = snprintf(buf + w, sizeof(buf) - w, " %02X", bytes[i]);
+        if (n <= 0) {
+            break;
+        }
+        w += (size_t)n;
+    }
+    if (w + 1 < sizeof(buf)) {
+        buf[w]     = '\n';
+        buf[w + 1] = '\0';
+    } else {
+        buf[sizeof(buf) - 2] = '\n';
+        buf[sizeof(buf) - 1] = '\0';
+    }
+    ps2_keyboard_uart_print(buf);
+}
 
 // clang-format off
 static const uint8_t hid_to_ps2_byte_map[] = {
@@ -233,9 +339,21 @@ static size_t ps2_keyboard_read(chardev_t* dev, void* buf, size_t size)
 static size_t ps2_keyboard_write(chardev_t* dev, const void* buf, size_t size)
 {
     hid_keyboard_t* kb = dev->data;
+    struct ps2_kbd_dbg_rec {
+        uint8_t val;
+        uint8_t state_before;
+        uint8_t state_after;
+        bool reporting_before;
+        bool reporting_after;
+    };
+    struct ps2_kbd_dbg_rec dbg[64];
+    size_t dbg_count = 0;
+
     spin_lock(&kb->lock);
     for (size_t i = 0; i < size; ++i) {
         uint8_t val = ((const uint8_t*)buf)[i];
+        uint8_t state_before = kb->state;
+        bool reporting_before = kb->reporting;
 
         switch (kb->state) {
             case PS2_STATE_CMD:
@@ -264,9 +382,24 @@ static size_t ps2_keyboard_write(chardev_t* dev, const void* buf, size_t size)
                 ringbuf_put_u8(&kb->cmdbuf, PS2_RSP_ACK);
                 break;
         }
+
+        if (dbg_count < STATIC_ARRAY_SIZE(dbg)) {
+            dbg[dbg_count++] = (struct ps2_kbd_dbg_rec){
+                .val = val,
+                .state_before = state_before,
+                .state_after = kb->state,
+                .reporting_before = reporting_before,
+                .reporting_after = kb->reporting,
+            };
+        }
     }
     spin_unlock(&kb->lock);
     chardev_notify(&kb->chardev, CHARDEV_RX);
+
+    for (size_t i = 0; i < dbg_count; ++i) {
+        ps2_keyboard_dbgf("ps2-kbd host->dev 0x%02X state %u->%u reporting %u->%u", dbg[i].val, dbg[i].state_before, dbg[i].state_after,
+                          dbg[i].reporting_before ? 1 : 0, dbg[i].reporting_after ? 1 : 0);
+    }
     return size;
 }
 
@@ -312,6 +445,7 @@ PUBLIC hid_keyboard_t* hid_keyboard_init_auto_ps2(rvvm_machine_t* machine)
     ringbuf_put_u8(&kb->cmdbuf, 0xAA);
 
     ps2_altera_init_auto(machine, &kb->chardev);
+    ps2_keyboard_dbgf("ps2-kbd debug enabled");
     return kb;
 }
 
@@ -388,6 +522,18 @@ static const uint8_t* hid_to_ps2_keycode(hid_key_t key, size_t* size)
 
 static void ps2_handle_keyboard(hid_keyboard_t* kb, hid_key_t key, bool pressed)
 {
+    bool dbg_log = false;
+    char dbg_prefix[64];
+    uint8_t dbg_bytes[8];
+    size_t dbg_len = 0;
+    enum {
+        PS2_KBD_DBG_NONE = 0,
+        PS2_KBD_DBG_IGNORED_NONE,
+        PS2_KBD_DBG_IGNORED_REPORTING_OFF,
+        PS2_KBD_DBG_IGNORED_REPEAT,
+        PS2_KBD_DBG_UNMAPPED,
+    } dbg_reason = PS2_KBD_DBG_NONE;
+
     spin_lock(&kb->lock);
     // Ignore repeated press/release events
     bool key_state = !!(kb->key_state[key >> 3] & (1 << (key & 0x7)));
@@ -405,6 +551,12 @@ static void ps2_handle_keyboard(hid_keyboard_t* kb, hid_key_t key, bool pressed)
                 ringbuf_put(&kb->cmdbuf, keycode, keycode_size);
                 rvtimer_init(&kb->sample_timer, 1000);
                 kb->sample_timecmp = (kb->delay + 1) * 250;
+
+                dbg_log = true;
+                dbg_len = keycode_size <= sizeof(dbg_bytes) ? keycode_size : 0;
+                if (dbg_len) {
+                    memcpy(dbg_bytes, keycode, dbg_len);
+                }
             } else {
                 uint8_t keycmd[8];
                 uint8_t keylen           = 0;
@@ -433,11 +585,49 @@ static void ps2_handle_keyboard(hid_keyboard_t* kb, hid_key_t key, bool pressed)
                     keylen    = 6;
                 }
                 ringbuf_put(&kb->cmdbuf, keycmd, keylen);
+
+                dbg_log = true;
+                dbg_len = keylen <= sizeof(dbg_bytes) ? keylen : 0;
+                if (dbg_len) {
+                    memcpy(dbg_bytes, keycmd, dbg_len);
+                }
             }
             chardev_notify(&kb->chardev, CHARDEV_RX);
+        } else {
+            dbg_reason = PS2_KBD_DBG_UNMAPPED;
+        }
+    } else {
+        if (key == HID_KEY_NONE) {
+            dbg_reason = PS2_KBD_DBG_IGNORED_NONE;
+        } else if (!kb->reporting) {
+            dbg_reason = PS2_KBD_DBG_IGNORED_REPORTING_OFF;
+        } else if (key_state == pressed) {
+            dbg_reason = PS2_KBD_DBG_IGNORED_REPEAT;
         }
     }
     spin_unlock(&kb->lock);
+
+    if (dbg_log && dbg_len) {
+        snprintf(dbg_prefix, sizeof(dbg_prefix), "hid=%u %s", (unsigned)key, pressed ? "down" : "up");
+        ps2_keyboard_dbg_bytes(dbg_prefix, dbg_bytes, dbg_len);
+    } else if (dbg_reason != PS2_KBD_DBG_NONE) {
+        switch (dbg_reason) {
+            case PS2_KBD_DBG_IGNORED_NONE:
+                ps2_keyboard_dbgf("ps2-kbd hid=NONE ignored");
+                break;
+            case PS2_KBD_DBG_IGNORED_REPORTING_OFF:
+                ps2_keyboard_dbgf("ps2-kbd hid=%u pressed=%u ignored reporting=0", (unsigned)key, pressed ? 1 : 0);
+                break;
+            case PS2_KBD_DBG_IGNORED_REPEAT:
+                ps2_keyboard_dbgf("ps2-kbd hid=%u pressed=%u ignored repeat", (unsigned)key, pressed ? 1 : 0);
+                break;
+            case PS2_KBD_DBG_UNMAPPED:
+                ps2_keyboard_dbgf("ps2-kbd hid=%u pressed=%u unmapped", (unsigned)key, pressed ? 1 : 0);
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 PUBLIC void hid_keyboard_press_ps2(hid_keyboard_t* kb, hid_key_t key)

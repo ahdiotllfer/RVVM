@@ -26,6 +26,62 @@ typedef struct {
     bool grab;
 } rvvm_window_t;
 
+static void rvvm_gui_kbd_press(rvvm_window_t* rvvm, hid_key_t key)
+{
+    if (rvvm->keyboard) {
+        hid_keyboard_press_virtio(rvvm->keyboard, key);
+    }
+}
+
+static void rvvm_gui_kbd_release(rvvm_window_t* rvvm, hid_key_t key)
+{
+    if (rvvm->keyboard) {
+        hid_keyboard_release_virtio(rvvm->keyboard, key);
+    }
+}
+
+static void rvvm_gui_mouse_press(rvvm_window_t* rvvm, hid_btns_t btns)
+{
+    if (rvvm->mouse) {
+        hid_mouse_press_virtio(rvvm->mouse, btns);
+    }
+}
+
+static void rvvm_gui_mouse_release(rvvm_window_t* rvvm, hid_btns_t btns)
+{
+    if (rvvm->mouse) {
+        hid_mouse_release_virtio(rvvm->mouse, btns);
+    }
+}
+
+static void rvvm_gui_mouse_resolution(rvvm_window_t* rvvm, uint32_t x, uint32_t y)
+{
+    if (rvvm->mouse) {
+        hid_mouse_resolution_virtio(rvvm->mouse, x, y);
+    }
+}
+
+static void rvvm_gui_mouse_place(rvvm_window_t* rvvm, int32_t x, int32_t y)
+{
+    if (rvvm->mouse) {
+        hid_mouse_place_virtio(rvvm->mouse, x, y);
+    }
+}
+
+static void rvvm_gui_mouse_move(rvvm_window_t* rvvm, int32_t x, int32_t y)
+{
+    if (rvvm->mouse) {
+        hid_mouse_move_virtio(rvvm->mouse, x, y);
+    }
+}
+
+static void rvvm_gui_mouse_scroll(rvvm_window_t* rvvm, int32_t offset)
+{
+    if (rvvm->mouse) {
+        hid_mouse_scroll_virtio(rvvm->mouse, offset);
+    }
+}
+
 static const uint8_t rvvm_logo_pix[] = {
     0xfc, 0x3f, 0xf0, 0x02, 0xcb, 0x0b, 0x2c, 0x3f, 0xf0, 0xcb, 0xf3, 0x03, 0x2f, 0xb0, 0xbc, 0xc0, 0xf2, 0xcf, 0xbf,
     0x3e, 0xf2, 0xf9, 0x01, 0xe7, 0x07, 0xac, 0xdf, 0xcf, 0xeb, 0x23, 0x9f, 0x1f, 0x70, 0x7e, 0xc0, 0xfa, 0x31, 0xbc,
@@ -69,8 +125,8 @@ static void rvvm_gui_on_close(gui_window_t* win)
     rvvm_window_t* rvvm = gui_window_get_data(win);
     if (rvvm_has_arg("poweroff_key")) {
         // Send poweroff request to the guest via keyboard key
-        hid_keyboard_press(rvvm->keyboard, HID_KEY_POWER);
-        hid_keyboard_release(rvvm->keyboard, HID_KEY_POWER);
+        rvvm_gui_kbd_press(rvvm, HID_KEY_POWER);
+        rvvm_gui_kbd_release(rvvm, HID_KEY_POWER);
     } else {
         rvvm_reset_machine(rvvm->machine, false);
     }
@@ -82,7 +138,7 @@ static void rvvm_gui_on_focus_lost(gui_window_t* win)
 
     // Fix stuck buttons after lost focus (Alt+Tab, etc)
     for (hid_key_t key = 0x00; key < 0xFF; ++key) {
-        hid_keyboard_release(rvvm->keyboard, key);
+        rvvm_gui_kbd_release(rvvm, key);
     }
 
     // Ungrab input
@@ -115,26 +171,26 @@ static void rvvm_gui_on_key_press(gui_window_t* win, hid_key_t key)
                 return;
         }
     }
-    hid_keyboard_press(rvvm->keyboard, key);
+    rvvm_gui_kbd_press(rvvm, key);
 }
 
 static void rvvm_gui_on_key_release(gui_window_t* win, hid_key_t key)
 {
     rvvm_window_t* rvvm = gui_window_get_data(win);
     rvvm_gui_handle_modkeys(rvvm, key, false);
-    hid_keyboard_release(rvvm->keyboard, key);
+    rvvm_gui_kbd_release(rvvm, key);
 }
 
 static void rvvm_gui_on_mouse_press(gui_window_t* win, hid_btns_t btns)
 {
     rvvm_window_t* rvvm = gui_window_get_data(win);
-    hid_mouse_press(rvvm->mouse, btns);
+    rvvm_gui_mouse_press(rvvm, btns);
 }
 
 static void rvvm_gui_on_mouse_release(gui_window_t* win, hid_btns_t btns)
 {
     rvvm_window_t* rvvm = gui_window_get_data(win);
-    hid_mouse_release(rvvm->mouse, btns);
+    rvvm_gui_mouse_release(rvvm, btns);
 }
 
 static void rvvm_gui_on_mouse_place(gui_window_t* win, int32_t x, int32_t y)
@@ -147,22 +203,22 @@ static void rvvm_gui_on_mouse_place(gui_window_t* win, int32_t x, int32_t y)
     if (rvvm_fb_width(&fb) != rvvm->width || rvvm_fb_height(&fb) != rvvm->height) {
         rvvm->width  = rvvm_fb_width(&fb);
         rvvm->height = rvvm_fb_height(&fb);
-        hid_mouse_resolution(rvvm->mouse, rvvm->width, rvvm->height);
+        rvvm_gui_mouse_resolution(rvvm, rvvm->width, rvvm->height);
     }
 
-    hid_mouse_place(rvvm->mouse, x, y);
+    rvvm_gui_mouse_place(rvvm, x, y);
 }
 
 static void rvvm_gui_on_mouse_move(gui_window_t* win, int32_t x, int32_t y)
 {
     rvvm_window_t* rvvm = gui_window_get_data(win);
-    hid_mouse_move(rvvm->mouse, x, y);
+    rvvm_gui_mouse_move(rvvm, x, y);
 }
 
 static void rvvm_gui_on_mouse_scroll(gui_window_t* win, int32_t offset)
 {
     rvvm_window_t* rvvm = gui_window_get_data(win);
-    hid_mouse_scroll(rvvm->mouse, offset);
+    rvvm_gui_mouse_scroll(rvvm, offset);
 }
 
 static void rvvm_gui_draw_logo(gui_window_t* win)
@@ -212,8 +268,8 @@ void gui_rvvm_register(gui_window_t* win, rvvm_machine_t* machine)
     rvvm_window_t* rvvm = safe_new_obj(rvvm_window_t);
 
     rvvm->machine  = machine;
-    rvvm->keyboard = hid_keyboard_init_auto(machine);
-    rvvm->mouse    = hid_mouse_init_auto(machine);
+    rvvm->keyboard = hid_keyboard_init_auto_virtio(machine);
+    rvvm->mouse    = hid_mouse_init_auto_virtio(machine);
 
     gui_window_set_data(win, rvvm);
     gui_window_register(win, &rvvm_gui_cb);
