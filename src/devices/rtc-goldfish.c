@@ -118,50 +118,8 @@ static bool rtc_goldfish_mmio_write(rvvm_mmio_dev_t* dev, void* data, size_t off
     return true;
 }
 
-static void rtc_goldfish_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    rtc_goldfish_dev_t* rtc = dev->data;
-    if (!rtc) {
-        return;
-    }
-
-    rvvm_state_write_u32(state, 1);
-    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtc->alarm_low));
-    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtc->alarm_high));
-    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtc->alarm_enabled));
-    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtc->irq_enabled));
-}
-
-static void rtc_goldfish_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    rtc_goldfish_dev_t* rtc = dev->data;
-    if (!rtc) {
-        return;
-    }
-
-    uint32_t version = 0;
-    uint32_t alarm_low = 0;
-    uint32_t alarm_high = 0;
-    uint32_t alarm_enabled = 0;
-    uint32_t irq_enabled = 0;
-    if (!rvvm_state_read_u32(state, &version) || version != 1 || !rvvm_state_read_u32(state, &alarm_low) ||
-        !rvvm_state_read_u32(state, &alarm_high) || !rvvm_state_read_u32(state, &alarm_enabled) ||
-        !rvvm_state_read_u32(state, &irq_enabled)) {
-        rvvm_state_fail(state);
-        return;
-    }
-
-    atomic_store_uint32_relax(&rtc->alarm_low, alarm_low);
-    atomic_store_uint32_relax(&rtc->alarm_high, alarm_high);
-    atomic_store_uint32_relax(&rtc->alarm_enabled, alarm_enabled);
-    atomic_store_uint32_relax(&rtc->irq_enabled, irq_enabled);
-    rtc_goldfish_update(rtc);
-}
-
 static rvvm_mmio_type_t rtc_goldfish_dev_type = {
     .name = "rtc_goldfish",
-    .suspend = rtc_goldfish_suspend,
-    .resume = rtc_goldfish_resume,
 };
 
 PUBLIC rvvm_mmio_dev_t* rtc_goldfish_init(rvvm_machine_t* machine, rvvm_addr_t addr, rvvm_intc_t* intc, rvvm_irq_t irq)

@@ -16,52 +16,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #define ACLINT_MSWI_SIZE   0x4000
 #define ACLINT_MTIMER_SIZE 0x8000
 
-static void aclint_mswi_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
-static void aclint_mswi_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
-static void aclint_mtimer_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
-static void aclint_mtimer_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
-
 static rvvm_mmio_type_t aclint_mswi_dev_type = {
     .name = "riscv_aclint_mswi",
-    .suspend = aclint_mswi_suspend,
-    .resume = aclint_mswi_resume,
 };
 
 static rvvm_mmio_type_t aclint_mtimer_dev_type = {
     .name = "riscv_aclint_mtimer",
-    .suspend = aclint_mtimer_suspend,
-    .resume = aclint_mtimer_resume,
 };
-
-static void aclint_mswi_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    UNUSED(dev);
-    rvvm_state_write_u32(state, 1);
-}
-
-static void aclint_mswi_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    UNUSED(dev);
-    uint32_t version = 0;
-    if (!rvvm_state_read_u32(state, &version) || version != 1) {
-        rvvm_state_fail(state);
-    }
-}
-
-static void aclint_mtimer_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    UNUSED(dev);
-    rvvm_state_write_u32(state, 1);
-}
-
-static void aclint_mtimer_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    UNUSED(dev);
-    uint32_t version = 0;
-    if (!rvvm_state_read_u32(state, &version) || version != 1) {
-        rvvm_state_fail(state);
-    }
-}
 
 static bool aclint_mswi_read(rvvm_mmio_dev_t* device, void* data, size_t offset, uint8_t size)
 {

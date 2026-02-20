@@ -239,10 +239,10 @@ void rcu_torture_test(uint32_t reader_threads, uint32_t secs)
     }
 
     for (uint32_t i = 0; i < reader_threads; ++i) {
-        rvvm_thread_create(rcu_torture_read_worker, NULL);
+        thread_create(rcu_torture_read_worker, NULL);
     }
 
-    rvvm_thread_create(rcu_torture_write_worker, NULL);
+    thread_create(rcu_torture_write_worker, NULL);
 
     for (uint32_t i = 0; i < secs; ++i) {
         sleep_ms(1000);

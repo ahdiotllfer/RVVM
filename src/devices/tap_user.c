@@ -137,7 +137,6 @@ struct tap_dev {
     thread_ctx_t* thread;
     net_sock_t*   shut[2];
     uint8_t       mac[6];
-    vector_t(char*) portfwds;
 
     bool          filt_lan;
 };
@@ -310,7 +309,6 @@ static void handle_icmp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_
                     ts = safe_new_obj(tap_sock_t);
                     ts->sock = sock;
                     ts->addr = *src;
-                    ts->addr.port = icmp_id;
                     ts->icmp = true;
                     hashmap_put(&tap->icmp_ids, icmp_id, (size_t)ts);
                     net_event_t event = { .data = ts, .flags = NET_POLL_RECV, };
@@ -325,17 +323,7 @@ static void handle_icmp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_
             if (ts->timeout != BOUND_INF) ts->timeout = 0;
             spin_unlock(&tap->lock);
 
-            int32_t sent = net_icmp_send(ts->sock, buffer, size, dst);
-            if (sent < 0 && sent != NET_ERR_BLOCK) {
-                spin_lock(&tap->lock);
-                if ((tap_sock_t*)hashmap_get(&tap->icmp_ids, icmp_id) == ts) {
-                    net_poll_remove(tap->poll, ts->sock);
-                    hashmap_remove(&tap->icmp_ids, icmp_id);
-                }
-                spin_unlock(&tap->lock);
-                net_sock_close(ts->sock);
-                free(ts);
-            }
+            net_icmp_send(ts->sock, buffer, size, dst);
             return;
         }
         emulate_icmp(tap, buffer, size, dst, src);
@@ -488,19 +476,7 @@ static void handle_udp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_a
     }
     if (ts->timeout != BOUND_INF) ts->timeout = 0;
     spin_unlock(&tap->lock);
-    if (tap_addr_allowed(tap, dst)) {
-        int32_t sent = net_udp_send(ts->sock, udb_buff, udp_size, dst);
-        if (sent < 0 && sent != NET_ERR_BLOCK) {
-            spin_lock(&tap->lock);
-            if ((tap_sock_t*)hashmap_get(&tap->udp_ports, src->port) == ts) {
-                net_poll_remove(tap->poll, ts->sock);
-                hashmap_remove(&tap->udp_ports, src->port);
-            }
-            spin_unlock(&tap->lock);
-            net_sock_close(ts->sock);
-            free(ts);
-        }
-    }
+    if (tap_addr_allowed(tap, dst)) net_udp_send(ts->sock, udb_buff, udp_size, dst);
 }
 
 static inline uint8_t* tcp_seg_buffer(tcp_segment_t* seg)
@@ -930,11 +906,6 @@ static void tap_udp_recv(tap_dev_t* tap, tap_sock_t* ts)
         create_udp_datagram(udp, size, ts->addr.port, addr.port);
         udp_ipv4_checksum(ipv4, size);
         eth_send(tap, buffer, size + UDP_HDR_SIZE + IPv4_HDR_SIZE + ETH2_HDR_SIZE);
-    } else if (result != NET_ERR_BLOCK) {
-        net_poll_remove(tap->poll, ts->sock);
-        hashmap_remove(&tap->udp_ports, ts->addr.port);
-        net_sock_close(ts->sock);
-        free(ts);
     }
 }
 
@@ -958,11 +929,6 @@ static void tap_icmp_recv(tap_dev_t* tap, tap_sock_t* ts)
         write_uint16_be_m(icmp + 2, 0); // Initial checksum is zero
         write_uint16_be_m(icmp + 2, ip_checksum(icmp, size, 0));
         eth_send(tap, buffer, size + IPv4_HDR_SIZE + ETH2_HDR_SIZE);
-    } else if (result != NET_ERR_BLOCK) {
-        net_poll_remove(tap->poll, ts->sock);
-        hashmap_remove(&tap->icmp_ids, ts->addr.port);
-        net_sock_close(ts->sock);
-        free(ts);
     }
 }
 
@@ -1171,14 +1137,6 @@ static void* tap_thread(void* arg)
     return NULL;
 }
 
-static char* tap_strdup(const char* str)
-{
-    size_t len = rvvm_strlen(str);
-    char*  out = safe_malloc(len + 1);
-    memcpy(out, str, len + 1);
-    return out;
-}
-
 tap_dev_t* tap_open(void)
 {
     tap_dev_t* tap = safe_new_obj(tap_dev_t);
@@ -1204,11 +1162,11 @@ void tap_attach(tap_dev_t* tap, const tap_net_dev_t* net_dev)
 {
     if (tap->net.feed_rx == NULL) {
         tap->net = *net_dev;
-        tap->thread = rvvm_thread_create(tap_thread, tap);
+        tap->thread = thread_create(tap_thread, tap);
     }
 }
 
-static bool tap_portfwd_internal(tap_dev_t* tap, const char* fwd, bool store_rule)
+bool tap_portfwd(tap_dev_t* tap, const char* fwd)
 {
     net_addr_t host = {0}, guest = {0};
     const char* parse = fwd;
@@ -1251,106 +1209,8 @@ static bool tap_portfwd_internal(tap_dev_t* tap, const char* fwd, bool store_rul
     if (!ret) {
         rvvm_error("Failed to forward port %s", fwd);
         if (host.port && host.port < 1024) rvvm_error("Binding ports below 1024 requires root/admin privilege");
-        return false;
-    }
-
-    if (store_rule) {
-        spin_lock(&tap->lock);
-        bool exists = false;
-        vector_foreach(tap->portfwds, i) {
-            if (rvvm_strcmp(vector_at(tap->portfwds, i), fwd)) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            vector_push_back(tap->portfwds, tap_strdup(fwd));
-        }
-        spin_unlock(&tap->lock);
     }
     return ret;
-}
-
-bool tap_portfwd(tap_dev_t* tap, const char* fwd)
-{
-    if (!tap || !fwd) {
-        return false;
-    }
-    return tap_portfwd_internal(tap, fwd, true);
-}
-
-bool tap_reinit(tap_dev_t* tap)
-{
-    if (!tap) {
-        return false;
-    }
-
-    net_sock_close(tap->shut[1]);
-    if (tap->thread) {
-        thread_join(tap->thread);
-        tap->thread = NULL;
-    }
-
-    spin_lock(&tap->lock);
-    hashmap_foreach(&tap->tcp_map, hash, ts_val) {
-        ts_vec_t* vec = (ts_vec_t*)ts_val;
-        UNUSED(hash);
-        vector_foreach_back(*vec, i) {
-            tap_tcp_close(NULL, vector_at(*vec, i));
-        }
-        vector_free(*vec);
-        free(vec);
-    }
-    hashmap_foreach(&tap->udp_ports, port, ts_val) {
-        UNUSED(port);
-        tap_sock_t* ts = (tap_sock_t*)ts_val;
-        net_poll_remove(tap->poll, ts->sock);
-        net_sock_close(ts->sock);
-        free(ts);
-    }
-    hashmap_foreach(&tap->icmp_ids, id, ts_val) {
-        UNUSED(id);
-        tap_sock_t* ts = (tap_sock_t*)ts_val;
-        net_poll_remove(tap->poll, ts->sock);
-        net_sock_close(ts->sock);
-        free(ts);
-    }
-    vector_foreach(tap->tcp_listeners, i) {
-        tap_sock_t* ts = vector_at(tap->tcp_listeners, i);
-        net_poll_remove(tap->poll, ts->sock);
-        tap_tcp_close(NULL, ts);
-    }
-    vector_free(tap->tcp_listeners);
-    tap->tcp_listeners = (ts_vec_t){0};
-
-    hashmap_destroy(&tap->udp_ports);
-    hashmap_destroy(&tap->icmp_ids);
-    hashmap_destroy(&tap->tcp_map);
-    hashmap_init(&tap->udp_ports, 16);
-    hashmap_init(&tap->icmp_ids, 16);
-    hashmap_init(&tap->tcp_map, 16);
-
-    net_sock_close(tap->shut[0]);
-    net_poll_close(tap->poll);
-    tap->poll = net_poll_create();
-    if (!tap->poll) {
-        spin_unlock(&tap->lock);
-        return false;
-    }
-
-    net_tcp_sockpair(tap->shut);
-    net_event_t event = { .data = NULL, };
-    net_poll_add(tap->poll, tap->shut[0], &event);
-    spin_unlock(&tap->lock);
-
-    vector_foreach(tap->portfwds, i) {
-        tap_portfwd_internal(tap, vector_at(tap->portfwds, i), false);
-    }
-
-    if (tap->net.feed_rx) {
-        tap->thread = rvvm_thread_create(tap_thread, tap);
-    }
-    return tap->thread != NULL;
 }
 
 void tap_close(tap_dev_t* tap)
@@ -1385,10 +1245,6 @@ void tap_close(tap_dev_t* tap)
         tap_tcp_close(NULL, vector_at(tap->tcp_listeners, i));
     }
     vector_free(tap->tcp_listeners);
-    vector_foreach(tap->portfwds, i) {
-        free(vector_at(tap->portfwds, i));
-    }
-    vector_free(tap->portfwds);
     hashmap_destroy(&tap->udp_ports);
     hashmap_destroy(&tap->icmp_ids);
     hashmap_destroy(&tap->tcp_map);

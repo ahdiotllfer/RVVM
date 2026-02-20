@@ -303,9 +303,6 @@ RVVM_PUBLIC void rvvm_free_machine(rvvm_machine_t* machine);
  */
 RVVM_PUBLIC void rvvm_run_eventloop(void);
 
-RVVM_PUBLIC bool rvvm_save_snapshot(rvvm_machine_t* machine, const char* path);
-RVVM_PUBLIC bool rvvm_load_snapshot(rvvm_machine_t* machine, const char* path);
-
 /** @}*/
 
 /**
@@ -318,16 +315,6 @@ RVVM_PUBLIC bool rvvm_load_snapshot(rvvm_machine_t* machine, const char* path);
  * Dummy MMIO handler: Reads zeros, ignores writes, never faults
  */
 RVVM_PUBLIC bool rvvm_mmio_none(rvvm_mmio_dev_t* dev, void* dest, size_t offset, uint8_t size);
-
-typedef struct rvvm_state_t rvvm_state_t;
-
-RVVM_PUBLIC bool rvvm_state_write(rvvm_state_t* state, const void* data, size_t size);
-RVVM_PUBLIC bool rvvm_state_read(rvvm_state_t* state, void* data, size_t size);
-RVVM_PUBLIC bool rvvm_state_write_u32(rvvm_state_t* state, uint32_t v);
-RVVM_PUBLIC bool rvvm_state_read_u32(rvvm_state_t* state, uint32_t* v);
-RVVM_PUBLIC bool rvvm_state_write_u64(rvvm_state_t* state, uint64_t v);
-RVVM_PUBLIC bool rvvm_state_read_u64(rvvm_state_t* state, uint64_t* v);
-RVVM_PUBLIC void rvvm_state_fail(rvvm_state_t* state);
 
 /**
  * MMIO device class information and handlers (Cleanup, reset, serialize)
@@ -345,8 +332,11 @@ typedef struct {
     /** Called on machine reset */
     void (*reset)(rvvm_mmio_dev_t* dev);
 
-    void (*suspend)(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
-    void (*resume)(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
+    /*
+     * TODO
+     * void (*suspend)(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
+     * void (*resume)(rvvm_mmio_dev_t* dev, rvvm_state_t* state);
+     */
 
 } rvvm_mmio_type_t;
 

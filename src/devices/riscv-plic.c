@@ -351,92 +351,11 @@ static void plic_update(rvvm_mmio_dev_t* dev)
     }
 }
 
-static void plic_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    plic_ctx_t* plic = dev->data;
-    if (!plic) {
-        return;
-    }
-
-    uint32_t ctx_count = plic_ctx_count(plic);
-    rvvm_state_write_u32(state, ctx_count);
-
-    for (size_t i = 0; i < PLIC_SRC_LIMIT; i++) {
-        rvvm_state_write_u32(state, atomic_load_uint32(&plic->prio[i]));
-    }
-    for (size_t i = 0; i < PLIC_SRC_REGS; i++) {
-        rvvm_state_write_u32(state, atomic_load_uint32(&plic->pending[i]));
-    }
-    for (size_t i = 0; i < PLIC_SRC_REGS; i++) {
-        rvvm_state_write_u32(state, atomic_load_uint32(&plic->raised[i]));
-    }
-    for (size_t ctx = 0; ctx < ctx_count; ctx++) {
-        for (size_t reg = 0; reg < PLIC_SRC_REGS; reg++) {
-            rvvm_state_write_u32(state, atomic_load_uint32(&plic->enable[ctx][reg]));
-        }
-    }
-    for (size_t ctx = 0; ctx < ctx_count; ctx++) {
-        rvvm_state_write_u32(state, atomic_load_uint32(&plic->threshold[ctx]));
-    }
-    rvvm_state_write_u32(state, plic->workaround_intx_storm ? 1U : 0U);
-}
-
-static void plic_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
-{
-    plic_ctx_t* plic = dev->data;
-    if (!plic) {
-        return;
-    }
-
-    uint32_t ctx_count = 0;
-    if (!rvvm_state_read_u32(state, &ctx_count) || ctx_count != plic_ctx_count(plic)) {
-        rvvm_state_fail(state);
-        return;
-    }
-
-    for (size_t i = 0; i < PLIC_SRC_LIMIT; i++) {
-        uint32_t v = 0;
-        rvvm_state_read_u32(state, &v);
-        atomic_store_uint32(&plic->prio[i], v);
-    }
-    for (size_t i = 0; i < PLIC_SRC_REGS; i++) {
-        uint32_t v = 0;
-        rvvm_state_read_u32(state, &v);
-        atomic_store_uint32(&plic->pending[i], v);
-    }
-    for (size_t i = 0; i < PLIC_SRC_REGS; i++) {
-        uint32_t v = 0;
-        rvvm_state_read_u32(state, &v);
-        atomic_store_uint32(&plic->raised[i], v);
-    }
-    for (size_t ctx = 0; ctx < ctx_count; ctx++) {
-        for (size_t reg = 0; reg < PLIC_SRC_REGS; reg++) {
-            uint32_t v = 0;
-            rvvm_state_read_u32(state, &v);
-            atomic_store_uint32(&plic->enable[ctx][reg], v);
-        }
-    }
-    for (size_t ctx = 0; ctx < ctx_count; ctx++) {
-        uint32_t v = 0;
-        rvvm_state_read_u32(state, &v);
-        atomic_store_uint32(&plic->threshold[ctx], v);
-    }
-    {
-        uint32_t v = 0;
-        rvvm_state_read_u32(state, &v);
-        plic->workaround_intx_storm = (v != 0);
-    }
-
-    plic_full_update(plic);
-}
-
 static rvvm_mmio_type_t plic_dev_type = {
     .name = "riscv_plic",
     .remove = plic_remove,
     .update = plic_update,
     .reset = plic_reset,
-    .suspend = plic_suspend,
-    .resume = plic_resume,
 };
 
 /*

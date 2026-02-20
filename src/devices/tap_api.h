@@ -45,9 +45,6 @@ PUBLIC bool tap_portfwd(tap_dev_t* tap, const char* fwd);
 // Set the host interface addr for this TAP interface
 PUBLIC bool tap_ifaddr(tap_dev_t* tap, const char* addr);
 
-// Reinitialize backend networking state (Drop active connections, keep attachment)
-PUBLIC bool tap_reinit(tap_dev_t* tap);
-
 // Shut down the interface
 PUBLIC void tap_close(tap_dev_t* tap);
 
