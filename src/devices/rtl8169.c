@@ -283,6 +283,133 @@ static void rtl8169_reset(rvvm_mmio_dev_t* dev)
     rtl8169_update_irqs(rtl8169);
 }
 
+static void rtl8169_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    rtl8169_dev_t* rtl8169 = dev->data;
+    if (!rtl8169) {
+        return;
+    }
+
+    spin_lock(&rtl8169->mac_lock);
+    spin_lock(&rtl8169->rx.lock);
+    spin_lock(&rtl8169->tx.lock);
+    spin_lock(&rtl8169->txp.lock);
+
+    tap_get_mac(rtl8169->tap, rtl8169->mac);
+
+    rvvm_state_write_u32(state, 1);
+
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->cr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->imr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->isr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->phydr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->phyar));
+
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->rx.addr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->rx.addr_h));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->rx.index));
+
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->tx.addr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->tx.addr_h));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->tx.index));
+
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->txp.addr));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->txp.addr_h));
+    rvvm_state_write_u32(state, atomic_load_uint32_relax(&rtl8169->txp.index));
+
+    rvvm_state_write(state, &rtl8169->eeprom, sizeof(rtl8169->eeprom));
+    rvvm_state_write(state, rtl8169->mac, RTL8169_MAC_SIZE);
+    uint64_t seg_size = (rtl8169->seg_size <= RTL8169_MAX_PKT_SIZE) ? (uint64_t)rtl8169->seg_size : 0;
+    rvvm_state_write_u64(state, seg_size);
+    rvvm_state_write(state, rtl8169->seg_buff, sizeof(rtl8169->seg_buff));
+
+    spin_unlock(&rtl8169->txp.lock);
+    spin_unlock(&rtl8169->tx.lock);
+    spin_unlock(&rtl8169->rx.lock);
+    spin_unlock(&rtl8169->mac_lock);
+}
+
+static void rtl8169_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    rtl8169_dev_t* rtl8169 = dev->data;
+    if (!rtl8169) {
+        return;
+    }
+
+    spin_lock(&rtl8169->mac_lock);
+    spin_lock(&rtl8169->rx.lock);
+    spin_lock(&rtl8169->tx.lock);
+    spin_lock(&rtl8169->txp.lock);
+
+    uint32_t version = 0;
+    if (!rvvm_state_read_u32(state, &version) || version != 1) {
+        rvvm_state_fail(state);
+        goto out;
+    }
+
+    uint32_t cr = 0, imr = 0, isr = 0, phydr = 0, phyar = 0;
+    uint32_t rx_addr = 0, rx_addr_h = 0, rx_index = 0;
+    uint32_t tx_addr = 0, tx_addr_h = 0, tx_index = 0;
+    uint32_t txp_addr = 0, txp_addr_h = 0, txp_index = 0;
+    uint64_t seg_size = 0;
+
+    if (!rvvm_state_read_u32(state, &cr)
+     || !rvvm_state_read_u32(state, &imr)
+     || !rvvm_state_read_u32(state, &isr)
+     || !rvvm_state_read_u32(state, &phydr)
+     || !rvvm_state_read_u32(state, &phyar)
+     || !rvvm_state_read_u32(state, &rx_addr)
+     || !rvvm_state_read_u32(state, &rx_addr_h)
+     || !rvvm_state_read_u32(state, &rx_index)
+     || !rvvm_state_read_u32(state, &tx_addr)
+     || !rvvm_state_read_u32(state, &tx_addr_h)
+     || !rvvm_state_read_u32(state, &tx_index)
+     || !rvvm_state_read_u32(state, &txp_addr)
+     || !rvvm_state_read_u32(state, &txp_addr_h)
+     || !rvvm_state_read_u32(state, &txp_index)
+     || !rvvm_state_read(state, &rtl8169->eeprom, sizeof(rtl8169->eeprom))
+     || !rvvm_state_read(state, rtl8169->mac, RTL8169_MAC_SIZE)
+     || !rvvm_state_read_u64(state, &seg_size)
+     || !rvvm_state_read(state, rtl8169->seg_buff, sizeof(rtl8169->seg_buff))) {
+        rvvm_state_fail(state);
+        goto out;
+    }
+
+    if (seg_size > RTL8169_MAX_PKT_SIZE) {
+        seg_size = 0;
+    }
+
+    atomic_store_uint32_relax(&rtl8169->cr, cr);
+    atomic_store_uint32_relax(&rtl8169->imr, imr);
+    atomic_store_uint32_relax(&rtl8169->isr, isr);
+    atomic_store_uint32_relax(&rtl8169->phydr, phydr);
+    atomic_store_uint32_relax(&rtl8169->phyar, phyar);
+
+    atomic_store_uint32_relax(&rtl8169->rx.addr, rx_addr);
+    atomic_store_uint32_relax(&rtl8169->rx.addr_h, rx_addr_h);
+    atomic_store_uint32_relax(&rtl8169->rx.index, rx_index);
+
+    atomic_store_uint32_relax(&rtl8169->tx.addr, tx_addr);
+    atomic_store_uint32_relax(&rtl8169->tx.addr_h, tx_addr_h);
+    atomic_store_uint32_relax(&rtl8169->tx.index, tx_index);
+
+    atomic_store_uint32_relax(&rtl8169->txp.addr, txp_addr);
+    atomic_store_uint32_relax(&rtl8169->txp.addr_h, txp_addr_h);
+    atomic_store_uint32_relax(&rtl8169->txp.index, txp_index);
+
+    rtl8169->seg_size = (size_t)seg_size;
+    rtl8169_update_irqs(rtl8169);
+
+out:
+    spin_unlock(&rtl8169->txp.lock);
+    spin_unlock(&rtl8169->tx.lock);
+    spin_unlock(&rtl8169->rx.lock);
+    spin_unlock(&rtl8169->mac_lock);
+
+    tap_reinit(rtl8169->tap);
+    tap_set_mac(rtl8169->tap, rtl8169->mac);
+}
+
 static uint16_t rtl8169_read_phy(uint32_t reg)
 {
     switch (reg) {
@@ -687,6 +814,8 @@ static rvvm_mmio_type_t rtl8169_type = {
     .name = "rtl8169",
     .remove = rtl8169_remove,
     .reset = rtl8169_reset,
+    .suspend = rtl8169_suspend,
+    .resume = rtl8169_resume,
 };
 
 static rvvm_mmio_type_t rtl8169_type_dummy = {

@@ -28,6 +28,7 @@ PUSH_OPTIMIZATION_SIZE
 // Threaded POSIX 1003.1-2001 file implementation using pread() / pwrite()
 #include <errno.h>  // For errno
 #include <fcntl.h>  // For struct flock, open(), fcntl(), posix_fallocate(), fallocate(), fspacectl(), fdiscard()
+#include <stdio.h>  // For SEEK_SET, SEEK_END
 #include <unistd.h> // For close(), lseek(), pread(), pwrite(), fdatasync(), ftruncate()
 
 #if defined(HOST_TARGET_NETBSD)

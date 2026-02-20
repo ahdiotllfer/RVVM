@@ -22,6 +22,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "utils.h"
 #include "vector.h"
 
+#include <stdio.h>
+
 PUSH_OPTIMIZATION_SIZE
 
 #define RVVM_POWER_OFF       0
@@ -454,7 +456,7 @@ static void rvvm_reconfigure_eventloop(void)
             eventloop_cond = condvar_create();
         }
         if (needs_thread && !eventloop_thread) {
-            eventloop_thread = thread_create(rvvm_eventloop, NULL);
+            eventloop_thread = rvvm_thread_create(rvvm_eventloop, NULL);
         }
     }
 #endif
@@ -810,6 +812,659 @@ PUBLIC void rvvm_run_eventloop(void)
     rvvm_set_manual_eventloop(true);
     rvvm_eventloop((void*)(size_t)1);
     rvvm_set_manual_eventloop(false);
+}
+
+static bool rvvm_snapshot_write(rvfile_t* file, uint64_t* off, const void* buf, size_t size)
+{
+    if (rvwrite(file, buf, size, *off) != size) {
+        return false;
+    }
+    *off += size;
+    return true;
+}
+
+static bool rvvm_snapshot_read(rvfile_t* file, uint64_t* off, void* buf, size_t size)
+{
+    if (rvread(file, buf, size, *off) != size) {
+        return false;
+    }
+    *off += size;
+    return true;
+}
+
+static bool rvvm_snapshot_write_u8(rvfile_t* file, uint64_t* off, uint8_t v)
+{
+    return rvvm_snapshot_write(file, off, &v, sizeof(v));
+}
+
+static bool rvvm_snapshot_write_u32(rvfile_t* file, uint64_t* off, uint32_t v)
+{
+    return rvvm_snapshot_write(file, off, &v, sizeof(v));
+}
+
+static bool rvvm_snapshot_write_u64(rvfile_t* file, uint64_t* off, uint64_t v)
+{
+    return rvvm_snapshot_write(file, off, &v, sizeof(v));
+}
+
+static bool rvvm_snapshot_read_u8(rvfile_t* file, uint64_t* off, uint8_t* v)
+{
+    return rvvm_snapshot_read(file, off, v, sizeof(*v));
+}
+
+static bool rvvm_snapshot_read_u32(rvfile_t* file, uint64_t* off, uint32_t* v)
+{
+    return rvvm_snapshot_read(file, off, v, sizeof(*v));
+}
+
+static bool rvvm_snapshot_read_u64(rvfile_t* file, uint64_t* off, uint64_t* v)
+{
+    return rvvm_snapshot_read(file, off, v, sizeof(*v));
+}
+
+static bool rvvm_snapshot_write_bytes(rvfile_t* file, uint64_t* off, const void* buf, size_t size)
+{
+    const uint8_t* p = (const uint8_t*)buf;
+    size_t remaining = size;
+    while (remaining) {
+        size_t chunk = remaining > (size_t)(16U * 1024U * 1024U) ? (size_t)(16U * 1024U * 1024U) : remaining;
+        if (!rvvm_snapshot_write(file, off, p, chunk)) {
+            return false;
+        }
+        p += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static bool rvvm_snapshot_read_bytes(rvfile_t* file, uint64_t* off, void* buf, size_t size)
+{
+    uint8_t* p = (uint8_t*)buf;
+    size_t remaining = size;
+    while (remaining) {
+        size_t chunk = remaining > (size_t)(16U * 1024U * 1024U) ? (size_t)(16U * 1024U * 1024U) : remaining;
+        if (!rvvm_snapshot_read(file, off, p, chunk)) {
+            return false;
+        }
+        p += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+struct rvvm_state_t {
+    rvfile_t* file;
+    uint64_t* off;
+    uint64_t end;
+    bool write;
+    bool ok;
+};
+
+PUBLIC bool rvvm_state_write(rvvm_state_t* state, const void* data, size_t size)
+{
+    if (!state || !state->ok || !state->write) {
+        return false;
+    }
+    if (rvwrite(state->file, data, size, *state->off) != size) {
+        state->ok = false;
+        return false;
+    }
+    *state->off += size;
+    return true;
+}
+
+PUBLIC bool rvvm_state_read(rvvm_state_t* state, void* data, size_t size)
+{
+    if (!state || !state->ok || state->write) {
+        return false;
+    }
+    if (*state->off + size > state->end) {
+        state->ok = false;
+        return false;
+    }
+    if (rvread(state->file, data, size, *state->off) != size) {
+        state->ok = false;
+        return false;
+    }
+    *state->off += size;
+    return true;
+}
+
+PUBLIC bool rvvm_state_write_u32(rvvm_state_t* state, uint32_t v)
+{
+    return rvvm_state_write(state, &v, sizeof(v));
+}
+
+PUBLIC bool rvvm_state_read_u32(rvvm_state_t* state, uint32_t* v)
+{
+    if (!v) {
+        return false;
+    }
+    return rvvm_state_read(state, v, sizeof(*v));
+}
+
+PUBLIC bool rvvm_state_write_u64(rvvm_state_t* state, uint64_t v)
+{
+    return rvvm_state_write(state, &v, sizeof(v));
+}
+
+PUBLIC bool rvvm_state_read_u64(rvvm_state_t* state, uint64_t* v)
+{
+    if (!v) {
+        return false;
+    }
+    return rvvm_state_read(state, v, sizeof(*v));
+}
+
+PUBLIC void rvvm_state_fail(rvvm_state_t* state)
+{
+    if (state) {
+        state->ok = false;
+    }
+}
+
+PUBLIC bool rvvm_save_snapshot(rvvm_machine_t* machine, const char* path)
+{
+    if (!machine || !path || rvvm_machine_running(machine)) {
+        return false;
+    }
+
+    rvfile_t* file = rvopen(path, RVFILE_RW | RVFILE_CREAT | RVFILE_TRUNC);
+    if (!file) {
+        return false;
+    }
+
+    bool ok = true;
+    uint64_t off = 0;
+
+    const char magic[8] = {'R', 'V', 'V', 'M', 'S', 'N', 'A', 'P'};
+    const uint32_t version = 1;
+    uint32_t flags = 0;
+#if defined(USE_FPU)
+    flags |= 0x1;
+#endif
+
+    uint64_t mem_addr = (uint64_t)machine->mem.addr;
+    uint64_t mem_size = (uint64_t)machine->mem.size;
+    uint32_t hart_count = (uint32_t)vector_size(machine->harts);
+    uint64_t timer_freq = rvtimer_freq(&machine->timer);
+    uint64_t timer_time = rvtimer_get(&machine->timer);
+
+    ok = ok && rvvm_snapshot_write(file, &off, magic, sizeof(magic));
+    ok = ok && rvvm_snapshot_write_u32(file, &off, version);
+    ok = ok && rvvm_snapshot_write_u32(file, &off, flags);
+    ok = ok && rvvm_snapshot_write_u64(file, &off, mem_addr);
+    ok = ok && rvvm_snapshot_write_u64(file, &off, mem_size);
+    ok = ok && rvvm_snapshot_write_u32(file, &off, hart_count);
+    ok = ok && rvvm_snapshot_write_u32(file, &off, 0);
+    ok = ok && rvvm_snapshot_write_u64(file, &off, timer_freq);
+    ok = ok && rvvm_snapshot_write_u64(file, &off, timer_time);
+
+    for (size_t i = 0; ok && i < (size_t)hart_count; i++) {
+        rvvm_hart_t* vm = vector_at(machine->harts, i);
+
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->mmu_mode);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->priv_mode);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->rv64 ? 1 : 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->trap ? 1 : 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->userland ? 1 : 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, vm->lrsc ? 1 : 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, 0);
+
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->root_page_table);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->trap_pc);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->lrsc_addr);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->lrsc_cas);
+
+        for (size_t r = 0; ok && r < RISCV_REGS_MAX; r++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->registers[r]);
+        }
+
+        ok = ok && rvvm_snapshot_write_u32(file, &off, vm->csr.fcsr);
+        ok = ok && rvvm_snapshot_write_u32(file, &off, vm->csr.hartid);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.status);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.ie);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.ip);
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.isa);
+
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.edeleg[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.ideleg[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.tvec[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.scratch[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.epc[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.cause[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.tval[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.iselect[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.counteren[p]);
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.envcfg[p]);
+        }
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)vm->csr.mseccfg);
+
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)rvtimecmp_get(&vm->mtimecmp));
+        ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)rvtimecmp_get(&vm->stimecmp));
+
+        ok = ok && rvvm_snapshot_write_u32(file, &off, vm->pending_irqs);
+        ok = ok && rvvm_snapshot_write_u32(file, &off, vm->pending_events);
+        ok = ok && rvvm_snapshot_write_u32(file, &off, vm->preempt_ms);
+        ok = ok && rvvm_snapshot_write_u32(file, &off, 0);
+
+#if defined(USE_FPU)
+        for (size_t f = 0; ok && f < RISCV_FPU_REGS_MAX; f++) {
+            uint64_t bits = 0;
+            memcpy(&bits, &vm->fpu_registers[f], sizeof(bits));
+            ok = ok && rvvm_snapshot_write_u64(file, &off, bits);
+        }
+#endif
+
+        uint8_t has_aia = vm->aia ? 1 : 0;
+        ok = ok && rvvm_snapshot_write_u8(file, &off, has_aia);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, 0);
+        ok = ok && rvvm_snapshot_write_u8(file, &off, 0);
+
+        if (has_aia) {
+            for (size_t smode = 0; ok && smode < 2; smode++) {
+                rvvm_aia_regfile_t* aia = &vm->aia[smode];
+                ok = ok && rvvm_snapshot_write_u32(file, &off, aia->eidelivery);
+                ok = ok && rvvm_snapshot_write_u32(file, &off, aia->eithreshold);
+                for (size_t k = 0; ok && k < RVVM_AIA_ARR_LEN; k++) {
+                    ok = ok && rvvm_snapshot_write_u32(file, &off, aia->eip[k]);
+                }
+                for (size_t k = 0; ok && k < RVVM_AIA_ARR_LEN; k++) {
+                    ok = ok && rvvm_snapshot_write_u32(file, &off, aia->eie[k]);
+                }
+            }
+        }
+    }
+
+    ok = ok && rvvm_snapshot_write_bytes(file, &off, machine->mem.data, (size_t)mem_size);
+
+    if (ok) {
+        const char dev_magic[8] = {'R', 'V', 'V', 'M', 'D', 'E', 'V', 'S'};
+        uint32_t dev_count = 0;
+        vector_foreach(machine->mmio_devs, i) {
+            rvvm_mmio_dev_t* dev = vector_at(machine->mmio_devs, i);
+            if (dev && dev->type && dev->type->suspend) {
+                dev_count++;
+            }
+        }
+
+        ok = ok && rvvm_snapshot_write(file, &off, dev_magic, sizeof(dev_magic));
+        ok = ok && rvvm_snapshot_write_u32(file, &off, dev_count);
+
+        vector_foreach(machine->mmio_devs, i) {
+            rvvm_mmio_dev_t* dev = vector_at(machine->mmio_devs, i);
+            if (!dev || !dev->type || !dev->type->suspend || !dev->type->name) {
+                continue;
+            }
+
+            uint32_t name_len = (uint32_t)strlen(dev->type->name);
+            ok = ok && rvvm_snapshot_write_u32(file, &off, name_len);
+            ok = ok && rvvm_snapshot_write(file, &off, dev->type->name, name_len);
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)dev->addr);
+            ok = ok && rvvm_snapshot_write_u64(file, &off, (uint64_t)dev->size);
+
+            uint64_t payload_len_pos = off;
+            ok = ok && rvvm_snapshot_write_u64(file, &off, 0);
+            uint64_t payload_start = off;
+
+            rvvm_state_t st = {
+                .file = file,
+                .off = &off,
+                .end = (uint64_t)-1,
+                .write = true,
+                .ok = true,
+            };
+            dev->type->suspend(dev, &st);
+            ok = ok && st.ok;
+
+            uint64_t payload_len = off - payload_start;
+            if (rvwrite(file, &payload_len, sizeof(payload_len), payload_len_pos) != sizeof(payload_len)) {
+                ok = false;
+            }
+        }
+    }
+
+    ok = ok && rvfsync(file);
+    rvclose(file);
+    return ok;
+}
+
+PUBLIC bool rvvm_load_snapshot(rvvm_machine_t* machine, const char* path)
+{
+    if (!machine || !path || rvvm_machine_running(machine)) {
+        return false;
+    }
+
+    rvfile_t* file = rvopen(path, RVFILE_READ);
+    if (!file) {
+        return false;
+    }
+
+    uint64_t file_size = rvfilesize(file);
+    bool ok = true;
+    uint64_t off = 0;
+
+    char magic[8] = {0};
+    uint32_t version = 0;
+    uint32_t flags = 0;
+    uint64_t mem_addr = 0;
+    uint64_t mem_size = 0;
+    uint32_t hart_count = 0;
+    uint32_t reserved = 0;
+    uint64_t timer_freq = 0;
+    uint64_t timer_time = 0;
+
+    ok = ok && rvvm_snapshot_read(file, &off, magic, sizeof(magic));
+    ok = ok && rvvm_snapshot_read_u32(file, &off, &version);
+    ok = ok && rvvm_snapshot_read_u32(file, &off, &flags);
+    ok = ok && rvvm_snapshot_read_u64(file, &off, &mem_addr);
+    ok = ok && rvvm_snapshot_read_u64(file, &off, &mem_size);
+    ok = ok && rvvm_snapshot_read_u32(file, &off, &hart_count);
+    ok = ok && rvvm_snapshot_read_u32(file, &off, &reserved);
+    ok = ok && rvvm_snapshot_read_u64(file, &off, &timer_freq);
+    ok = ok && rvvm_snapshot_read_u64(file, &off, &timer_time);
+
+    if (!ok || memcmp(magic, "RVVMSNAP", 8) != 0 || version != 1 || reserved != 0) {
+        ok = false;
+    }
+
+    if (ok && !rvvm_machine_powered(machine)) {
+        rvvm_reset_machine_state(machine);
+    }
+
+#if defined(USE_FPU)
+    if (ok && !(flags & 0x1)) {
+        ok = false;
+    }
+#else
+    if (ok && (flags & 0x1)) {
+        ok = false;
+    }
+#endif
+
+    if (ok) {
+        if (mem_addr != (uint64_t)machine->mem.addr || mem_size != (uint64_t)machine->mem.size) {
+            ok = false;
+        }
+        if (hart_count != (uint32_t)vector_size(machine->harts)) {
+            ok = false;
+        }
+        if (timer_freq != rvtimer_freq(&machine->timer)) {
+            ok = false;
+        }
+    }
+
+    if (ok) {
+        rvtimer_rebase(&machine->timer, timer_time);
+    }
+
+    for (size_t i = 0; ok && i < (size_t)hart_count; i++) {
+        rvvm_hart_t* vm = vector_at(machine->harts, i);
+
+        uint8_t mmu_mode = 0;
+        uint8_t priv_mode = 0;
+        uint8_t rv64 = 0;
+        uint8_t trap = 0;
+        uint8_t userland = 0;
+        uint8_t lrsc = 0;
+        uint8_t pad0 = 0;
+        uint8_t pad1 = 0;
+
+        uint64_t root_page_table = 0;
+        uint64_t trap_pc = 0;
+        uint64_t lrsc_addr = 0;
+        uint64_t lrsc_cas = 0;
+
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &mmu_mode);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &priv_mode);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &rv64);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &trap);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &userland);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &lrsc);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &pad0);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &pad1);
+
+        ok = ok && rvvm_snapshot_read_u64(file, &off, &root_page_table);
+        ok = ok && rvvm_snapshot_read_u64(file, &off, &trap_pc);
+        ok = ok && rvvm_snapshot_read_u64(file, &off, &lrsc_addr);
+        ok = ok && rvvm_snapshot_read_u64(file, &off, &lrsc_cas);
+
+        vm->mmu_mode = mmu_mode;
+        vm->priv_mode = priv_mode;
+        vm->rv64 = !!rv64;
+        vm->trap = !!trap;
+        vm->userland = !!userland;
+        vm->lrsc = !!lrsc;
+        vm->root_page_table = (rvvm_addr_t)root_page_table;
+        vm->trap_pc = (rvvm_addr_t)trap_pc;
+        vm->lrsc_addr = (rvvm_uxlen_t)lrsc_addr;
+        vm->lrsc_cas = (rvvm_uxlen_t)lrsc_cas;
+
+        for (size_t r = 0; ok && r < RISCV_REGS_MAX; r++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->registers[r] = (rvvm_uxlen_t)v;
+        }
+
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &vm->csr.fcsr);
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &vm->csr.hartid);
+
+        {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.status = (rvvm_uxlen_t)v;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.ie = (rvvm_uxlen_t)v;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.ip = (rvvm_uxlen_t)v;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.isa = (rvvm_uxlen_t)v;
+        }
+
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.edeleg[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.ideleg[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.tvec[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.scratch[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.epc[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.cause[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.tval[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.iselect[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            uint64_t v = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &v);
+            vm->csr.counteren[p] = (rvvm_uxlen_t)v;
+        }
+        for (size_t p = 0; ok && p < RISCV_PRIVS_MAX; p++) {
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &vm->csr.envcfg[p]);
+        }
+        ok = ok && rvvm_snapshot_read_u64(file, &off, &vm->csr.mseccfg);
+
+        {
+            uint64_t mtimecmp = 0;
+            uint64_t stimecmp = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &mtimecmp);
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &stimecmp);
+            rvtimecmp_init(&vm->mtimecmp, &machine->timer);
+            rvtimecmp_init(&vm->stimecmp, &machine->timer);
+            rvtimecmp_set(&vm->mtimecmp, mtimecmp);
+            rvtimecmp_set(&vm->stimecmp, stimecmp);
+        }
+
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &vm->pending_irqs);
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &vm->pending_events);
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &vm->preempt_ms);
+        ok = ok && rvvm_snapshot_read_u32(file, &off, &reserved);
+
+        if (reserved != 0) {
+            ok = false;
+        }
+
+#if defined(USE_FPU)
+        for (size_t f = 0; ok && f < RISCV_FPU_REGS_MAX; f++) {
+            uint64_t bits = 0;
+            ok = ok && rvvm_snapshot_read_u64(file, &off, &bits);
+            memcpy(&vm->fpu_registers[f], &bits, sizeof(bits));
+        }
+#endif
+
+        uint8_t has_aia = 0;
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &has_aia);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &pad0);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &pad1);
+        ok = ok && rvvm_snapshot_read_u8(file, &off, &rv64);
+
+        if (pad0 || pad1 || rv64) {
+            ok = false;
+        }
+
+        if (ok && has_aia) {
+            if (!vm->aia) {
+                riscv_hart_aia_init(vm);
+            }
+            for (size_t smode = 0; ok && smode < 2; smode++) {
+                rvvm_aia_regfile_t* aia = &vm->aia[smode];
+                ok = ok && rvvm_snapshot_read_u32(file, &off, &aia->eidelivery);
+                ok = ok && rvvm_snapshot_read_u32(file, &off, &aia->eithreshold);
+                for (size_t k = 0; ok && k < RVVM_AIA_ARR_LEN; k++) {
+                    ok = ok && rvvm_snapshot_read_u32(file, &off, &aia->eip[k]);
+                }
+                for (size_t k = 0; ok && k < RVVM_AIA_ARR_LEN; k++) {
+                    ok = ok && rvvm_snapshot_read_u32(file, &off, &aia->eie[k]);
+                }
+            }
+        }
+
+        if (ok) {
+            riscv_tlb_flush(vm);
+            riscv_jit_flush_cache(vm);
+        }
+    }
+
+    if (ok) {
+        ok = rvvm_snapshot_read_bytes(file, &off, machine->mem.data, (size_t)mem_size);
+    }
+    if (ok) {
+        riscv_jit_mark_dirty_mem(machine, machine->mem.addr, machine->mem.size);
+    }
+
+    if (ok && off < file_size) {
+        if (file_size - off >= 12) {
+            char dev_magic[8] = {0};
+            uint32_t dev_count = 0;
+            uint64_t saved_off = off;
+            if (rvvm_snapshot_read(file, &off, dev_magic, sizeof(dev_magic)) && memcmp(dev_magic, "RVVMDEVS", 8) == 0) {
+                ok = ok && rvvm_snapshot_read_u32(file, &off, &dev_count);
+                for (uint32_t i = 0; ok && i < dev_count; i++) {
+                    uint32_t name_len = 0;
+                    ok = ok && rvvm_snapshot_read_u32(file, &off, &name_len);
+                    if (!ok || name_len == 0 || name_len > 256 || off + name_len > file_size) {
+                        ok = false;
+                        break;
+                    }
+
+                    char name_buf[257];
+                    memset(name_buf, 0, sizeof(name_buf));
+                    ok = ok && rvvm_snapshot_read(file, &off, name_buf, name_len);
+
+                    uint64_t dev_addr = 0;
+                    uint64_t dev_size = 0;
+                    uint64_t payload_len = 0;
+                    ok = ok && rvvm_snapshot_read_u64(file, &off, &dev_addr);
+                    ok = ok && rvvm_snapshot_read_u64(file, &off, &dev_size);
+                    ok = ok && rvvm_snapshot_read_u64(file, &off, &payload_len);
+                    if (!ok || off + payload_len > file_size) {
+                        ok = false;
+                        break;
+                    }
+
+                    uint64_t payload_end = off + payload_len;
+                    rvvm_mmio_dev_t* match = NULL;
+                    vector_foreach(machine->mmio_devs, j) {
+                        rvvm_mmio_dev_t* dev = vector_at(machine->mmio_devs, j);
+                        if (!dev || !dev->type || !dev->type->name) {
+                            continue;
+                        }
+                        if ((uint64_t)dev->addr == dev_addr && (uint64_t)dev->size == dev_size && strcmp(dev->type->name, name_buf) == 0) {
+                            match = dev;
+                            break;
+                        }
+                    }
+
+                    if (match && match->type && match->type->resume) {
+                        rvvm_state_t st = {
+                            .file = file,
+                            .off = &off,
+                            .end = payload_end,
+                            .write = false,
+                            .ok = true,
+                        };
+                        match->type->resume(match, &st);
+                        ok = ok && st.ok;
+                    }
+
+                    off = payload_end;
+                }
+            } else {
+                off = saved_off;
+            }
+        }
+    }
+
+    rvclose(file);
+    return ok;
 }
 
 /*

@@ -242,7 +242,7 @@ thread_ctx_t* thread_create_ex(thread_func_t func, void* arg, uint32_t stack_siz
     return NULL;
 }
 
-thread_ctx_t* thread_create(thread_func_t func, void* arg)
+thread_ctx_t* rvvm_thread_create(thread_func_t func, void* arg)
 {
     return thread_create_ex(func, arg, 0x10000);
 }
@@ -1223,7 +1223,7 @@ static void threadpool_init(void)
     workqueue_init(&pool_wq);
     pool_cond = condvar_create();
     for (size_t i = 0; i < WORKER_THREADS; ++i) {
-        pool_threads[i] = thread_create(threadpool_worker, NULL);
+        pool_threads[i] = rvvm_thread_create(threadpool_worker, NULL);
     }
     call_at_deinit(thread_workers_terminate);
 }
