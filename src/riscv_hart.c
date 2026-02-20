@@ -120,13 +120,8 @@ void riscv_update_xlen(rvvm_hart_t* vm)
             rv64 = bit_check(vm->csr.status, 33);
             break;
     }
-
     if (vm->rv64 != rv64) {
         vm->rv64 = rv64;
-#ifdef USE_JIT
-        rvjit_set_rv64(&vm->jit, rv64);
-        riscv_jit_flush_cache(vm);
-#endif
         riscv_restart_dispatch(vm);
     }
 #else
@@ -418,9 +413,13 @@ static void riscv_handle_irqs(rvvm_hart_t* vm)
 
 void riscv_hart_run(rvvm_hart_t* vm)
 {
-    rvvm_info("Hart %p started", vm);
+#if defined(USE_THREAD_EMU)
+    rvtimer_t timer = ZERO_INIT;
+    rvtimer_init(&timer, 1000000000ULL);
+#endif
 
-    while (true) {
+    riscv_csr_sync_fpu(vm);
+    do {
         // Allow hart to run
         atomic_store_uint32_ex(&vm->running, true, ATOMIC_RELAXED);
 
@@ -428,8 +427,7 @@ void riscv_hart_run(rvvm_hart_t* vm)
         uint32_t events = atomic_swap_uint32(&vm->pending_events, 0);
         if (unlikely(events)) {
             if (events & HART_EVENT_PAUSE) {
-                rvvm_info("Hart %p stopped", vm);
-                return;
+                break;
             }
             if (events & HART_EVENT_PREEMPT) {
                 sleep_ms(atomic_swap_uint32(&vm->preempt_ms, 0));
@@ -444,7 +442,12 @@ void riscv_hart_run(rvvm_hart_t* vm)
             vm->registers[RISCV_REG_PC] = vm->trap_pc;
             vm->trap                    = false;
         }
-    }
+#if defined(USE_THREAD_EMU)
+    } while (rvtimer_get(&timer) < 16666666ULL);
+#else
+    } while (true);
+#endif
+    riscv_csr_sync_fpu(vm);
 }
 
 static void* riscv_hart_run_thread(void* ptr)
@@ -453,9 +456,7 @@ static void* riscv_hart_run_thread(void* ptr)
     if (!rvvm_has_arg("noisolation")) {
         rvvm_restrict_this_thread();
     }
-    riscv_csr_sync_fpu(vm);
     riscv_hart_run(vm);
-    riscv_csr_sync_fpu(vm);
     return NULL;
 }
 
@@ -475,9 +476,7 @@ void riscv_hart_queue_pause(rvvm_hart_t* vm)
 
 void riscv_hart_pause(rvvm_hart_t* vm)
 {
-    if (vm->thread) {
-        riscv_hart_queue_pause(vm);
-        thread_join(vm->thread);
-        vm->thread = NULL;
-    }
+    riscv_hart_queue_pause(vm);
+    thread_join(vm->thread);
+    vm->thread = NULL;
 }

@@ -9,7 +9,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 */
 
 // Must be included before system headers
-#include "feature_test.h"
+#include "feature_test.h" // IWYU pragma: keep
 
 #include "compiler.h"
 #include "gui_window.h"
@@ -435,7 +435,7 @@ static void wl_keyboard_on_key(void* data, struct wl_keyboard* keyboard, uint32_
         hid_key_t     hid_key = wayland_keysym_to_hid(keysym);
         if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
             gui_backend_on_key_press(win, hid_key);
-        } else {
+        } else if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
             gui_backend_on_key_release(win, hid_key);
         }
     }
@@ -521,7 +521,7 @@ static void wl_pointer_on_button(void* data, struct wl_pointer* pointer, uint32_
         }
         if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
             gui_backend_on_mouse_press(win, btns);
-        } else {
+        } else if (state == WL_POINTER_BUTTON_STATE_RELEASED) {
             gui_backend_on_mouse_release(win, btns);
         }
     }
@@ -532,9 +532,9 @@ static void wl_pointer_on_axis(void* data, struct wl_pointer* pointer, //
 {
     wl_ptr_data_t* ptr_data = data;
     UNUSED(pointer && time);
-    if (ptr_data && ptr_data->surface && axis) {
+    if (ptr_data && ptr_data->surface && !axis) {
         gui_window_t* win = wl_surface_get_user_data(ptr_data->surface);
-        gui_backend_on_mouse_scroll(win, wl_fixed_to_int(value));
+        gui_backend_on_mouse_scroll(win, EVAL_MAX(EVAL_MIN(wl_fixed_to_int(value), 1), -1));
     }
 }
 
@@ -906,7 +906,7 @@ static bool wayland_global_init(void)
     // Launch the event thread
     wl_thread = rvvm_thread_create(wl_event_worker, NULL);
 
-    return true;
+    return !!wl_thread;
 }
 
 // Perform global Wayland deinitialization
@@ -1200,6 +1200,7 @@ bool wayland_window_init(gui_window_t* win)
 
     if (!atomic_add_uint32(&wl_windows, 1) && !wayland_global_init()) {
         // Wayland global init failed
+        wayland_global_free();
         return false;
     }
 

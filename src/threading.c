@@ -29,7 +29,9 @@ PUSH_OPTIMIZATION_SIZE
  * Determine threading implementation
  */
 
-#if defined(HOST_TARGET_WIN32)
+#if defined(USE_THREAD_EMU)
+// Use voluntary preemption in a single thread
+#elif defined(HOST_TARGET_WIN32)
 // Use Win32 threads & events
 #include <windows.h>
 #define WIN32_THREADS_IMPL 1
@@ -38,16 +40,18 @@ PUSH_OPTIMIZATION_SIZE
 #include <pthread.h>
 #include <time.h>
 #define POSIX_THREADS_IMPL 1
-#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112LL /**/                                                   \
-    && !defined(__STDC_NO_THREADS__) && CHECK_INCLUDE(threads.h, 1)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112LL && !defined(__STDC_NO_THREADS__) /**/                  \
+    && CHECK_INCLUDE(threads.h, 1) && !defined(HOST_TARGET_DOS) && !defined(HOST_TARGET_POSIX)
 // Use C11 threads
 #include <threads.h>
 #include <time.h>
 #define C11_THREADS_IMPL 1
-#else
+#elif CHECK_INCLUDE(SDL.h, 1)
 // Use SDL threads
-#include <SDL/SDL.h>
+#include <SDL.h>
 #define SDL_THREADS_IMPL 1
+#else
+#error No threading implementation found, please rebuild with USE_THREAD_EMU=1
 #endif
 
 #if defined(HOST_TARGET_POSIX) && HOST_TARGET_POSIX >= 199506L && CHECK_INCLUDE(sched.h, 1)
@@ -60,7 +64,7 @@ PUSH_OPTIMIZATION_SIZE
  * Probe for native futex support
  */
 
-#if !defined(USE_FUTEX_EMU)
+#if !defined(USE_FUTEX_EMU) && !defined(USE_THREAD_EMU)
 #if defined(HOST_TARGET_LINUX) && CHECK_INCLUDE(sys/syscall.h, 1)
 
 // Use Linux futexes (Linux 2.6.22+)
@@ -133,7 +137,7 @@ static int (*ulock_wake)(uint32_t op, void* ptr, uint64_t unused)           = NU
  * Probe for futex emulation helpers
  */
 
-#if !defined(NATIVE_FUTEX_IMPL) && !defined(HOST_TARGET_WIN32)
+#if !defined(NATIVE_FUTEX_IMPL) && defined(HOST_TARGET_POSIX)
 #if defined(USE_FUTEX_OVER_PIPE)
 // Use pipe(), select(), close() for futex emulation
 #include <sys/select.h>
@@ -196,6 +200,9 @@ static THREAD_RET THREAD_ABI func_unwrap(void* arg)
 
 thread_ctx_t* thread_create_ex(thread_func_t func, void* arg, uint32_t stack_size)
 {
+#if defined(USE_THREAD_EMU)
+    UNUSED(func && arg && stack_size);
+#else
     thread_ctx_t* thread = safe_new_obj(thread_ctx_t);
     bool          result = false;
 #if defined(SANITIZERS_ENABLED)
@@ -224,8 +231,6 @@ thread_ctx_t* thread_create_ex(thread_func_t func, void* arg, uint32_t stack_siz
 #elif defined(SDL_THREADS_IMPL)
     thread->thread = SDL_CreateThread(func_unwrap, func_wrap(func, arg));
     result         = !!thread->thread;
-#else
-    func(arg);
 #endif
     UNUSED(stack_size);
     if (result) {
@@ -233,6 +238,7 @@ thread_ctx_t* thread_create_ex(thread_func_t func, void* arg, uint32_t stack_siz
     }
     rvvm_warn("Failed to spawn thread %p", (void*)func);
     safe_free(thread);
+#endif
     return NULL;
 }
 
@@ -244,6 +250,9 @@ thread_ctx_t* rvvm_thread_create(thread_func_t func, void* arg)
 bool thread_join(thread_ctx_t* thread)
 {
     bool result = false;
+#if defined(USE_THREAD_EMU)
+    UNUSED(thread);
+#else
     if (thread) {
 #if defined(WIN32_THREADS_IMPL)
         result = !WaitForSingleObject(thread->handle, INFINITE) && CloseHandle(thread->handle);
@@ -263,6 +272,7 @@ bool thread_join(thread_ctx_t* thread)
             rvvm_warn("Failed to join thread");
         }
     }
+#endif
     return result;
 }
 
@@ -296,7 +306,7 @@ void thread_cpu_relax(void)
 #endif
 }
 
-#if !defined(NATIVE_FUTEX_IMPL)
+#if !defined(NATIVE_FUTEX_IMPL) && !defined(USE_THREAD_EMU)
 
 /*
  * Host-specific futex emulation helpers
@@ -909,7 +919,12 @@ static bool thread_futex_is_native(void)
 uint32_t thread_futex_wait(void* ptr, uint32_t val, uint64_t timeout_ns)
 {
     if (likely(ptr && timeout_ns)) {
-#if defined(NATIVE_FUTEX_IMPL)
+#if defined(USE_THREAD_EMU)
+        if (atomic_load_uint32(ptr) != val) {
+            return THREAD_FUTEX_MISMATCH;
+        }
+        sleep_ns(timeout_ns);
+#elif defined(NATIVE_FUTEX_IMPL)
         return thread_futex_native_wait(ptr, val, timeout_ns);
 #else
 #if defined(HYBRID_FUTEX_IMPL)
@@ -920,11 +935,13 @@ uint32_t thread_futex_wait(void* ptr, uint32_t val, uint64_t timeout_ns)
         return thread_futex_emu_wait(ptr, val, timeout_ns);
 #endif
     }
-    return 0;
+    return THREAD_FUTEX_TIMEOUT;
 }
 
 void thread_futex_wake(void* ptr, uint32_t num)
 {
+    UNUSED(ptr && num);
+#if !defined(USE_THREAD_EMU)
     if (likely(ptr && num)) {
 #if defined(NATIVE_FUTEX_IMPL)
         thread_futex_native_wake(ptr, num);
@@ -938,6 +955,7 @@ void thread_futex_wake(void* ptr, uint32_t num)
         thread_futex_emu_wake(ptr, num);
 #endif
     }
+#endif
 }
 
 /*
@@ -1055,8 +1073,23 @@ void condvar_free(cond_var_t* cond)
  * Threadpool
  */
 
+#if defined(USE_THREAD_EMU)
+
+void thread_create_task(thread_func_t func, void* arg)
+{
+    func(arg);
+}
+
+void thread_create_task_va(thread_func_va_t func, void** args, unsigned arg_count)
+{
+    UNUSED(arg_count);
+    func(args);
+}
+
+#else
+
 #define WORKER_THREADS 4
-#define WORKQUEUE_SIZE 2048
+#define WORKQUEUE_SIZE 256
 #define WORKQUEUE_MASK (WORKQUEUE_SIZE - 1)
 
 BUILD_ASSERT(!(WORKQUEUE_SIZE & WORKQUEUE_MASK));
@@ -1070,11 +1103,8 @@ typedef struct {
 
 typedef struct {
     task_item_t tasks[WORKQUEUE_SIZE];
-    char        pad0[64];
     uint32_t    head;
-    char        pad1[64];
     uint32_t    tail;
-    char        pad2[64];
 } work_queue_t;
 
 static uint32_t      pool_run;
@@ -1230,5 +1260,7 @@ void thread_create_task_va(thread_func_va_t func, void** args, unsigned arg_coun
         func(args);
     }
 }
+
+#endif
 
 POP_OPTIMIZATION_SIZE

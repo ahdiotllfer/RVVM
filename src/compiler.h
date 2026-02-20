@@ -137,6 +137,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #define HOST_64BIT 1
 #elif !defined(UINTPTR_MAX) || !defined(SIZE_MAX) || (UINTPTR_MAX == 0xFFFFFFFFU) || (SIZE_MAX == 0xFFFFFFFFU)
 #define HOST_32BIT 1
+#elif !defined(UINTPTR_MAX) || !defined(SIZE_MAX) || (UINTPTR_MAX == 0xFFFFU) || (SIZE_MAX == 0xFFFFU)
+#define HOST_16BIT 1
 #endif
 
 // Determine integer endianness (Possibly neither big/little endian)
@@ -257,14 +259,14 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // Force-inline this function
 #undef forceinline
-#if !defined(USE_NO_FORCEINLINE) && !defined(__SANITIZE_THREAD__)                                                      \
-    && (GCC_CHECK_VER(3, 3) || GNU_ATTRIBUTE(__always_inline__))
-// ThreadSanitizer doesn't play well with __always_inline__
+#if !defined(USE_NO_FORCEINLINE) && (GCC_CHECK_VER(3, 3) || GNU_ATTRIBUTE(__always_inline__)) /**/                     \
+    && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
+// Sanitizers don't play well with __always_inline__
 #define forceinline inline __attribute__((__always_inline__))
 #elif !defined(USE_NO_FORCEINLINE) && defined(COMPILER_IS_MSVC)
 #define forceinline __forceinline
 #else
-#define forceinline inline GNU_DUMMY_ATTRIBUTE
+#define forceinline inline
 #endif
 
 // Never inline this function
@@ -316,21 +318,30 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #define func_opt_size GNU_DUMMY_ATTRIBUTE
 #endif
 
-// Optimize cold function for size
+// Hint cold function, minimize call site intrusion if possible
 #undef func_opt_cold
 #if GCC_CHECK_VER(4, 5)
-#define func_opt_cold func_opt_size __attribute__((__cold__, __noclone__))
+#define func_opt_cold __attribute__((__cold__, __noclone__))
 #elif GNU_ATTRIBUTE(__cold__)
-#define func_opt_cold func_opt_size __attribute__((__cold__))
+#define func_opt_cold __attribute__((__cold__))
 #else
 #define func_opt_cold GNU_DUMMY_ATTRIBUTE
 #endif
 
 /*
- * Never inline a function, consider it a slow path, and minimize pessimizations at the call site
+ * Reduce call site overhead in a less aggressive way
  *
- * This is used to remove unnecessary register spills at the slow path call site.
- * Requires Clang 17+ ideally, otherwise __cold__ attribute is used, which moves spills away.
+ * NOTE: This affects the function ABI, do not expose such functions dynamically
+ */
+#undef cold_path
+#if defined(__i386__) && GNU_ATTRIBUTE(__stdcall__)
+#define cold_path no_inline func_opt_cold __attribute__((__stdcall__))
+#else
+#define cold_path no_inline func_opt_cold
+#endif
+
+/*
+ * Minimize call site intrusion, omitting register spill around a slow path
  *
  * NOTE: This affects the function ABI, do not expose such functions dynamically
  * NOTE: __preserve_most__ is broken on Clang <17, and on Clang Windows ARM64
@@ -340,9 +351,9 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #undef slow_path
 #if !defined(USE_NO_SLOW_PATH) && CLANG_CHECK_VER(17, 0)                                                               \
     && (defined(__x86_64__) || (defined(__aarch64__) && !defined(_WIN32)))
-#define slow_path no_inline func_opt_size __attribute__((__preserve_most__))
+#define slow_path cold_path __attribute__((__preserve_most__))
 #else
-#define slow_path no_inline func_opt_cold
+#define slow_path cold_path
 #endif
 
 // Per-source optimization level requests via definition (GCC only)
@@ -545,9 +556,17 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #define deallocate_with(deallocator) warn_unused_ret
 #endif
 
+// Suppress AddressSanitizer for a function with false positives
+#undef ASAN_SUPPRESS
+#if defined(__SANITIZE_ADDRESS__) && GNU_ATTRIBUTE(__no_sanitize__)
+#define ASAN_SUPPRESS __attribute__((__no_sanitize__("address")))
+#else
+#define ASAN_SUPPRESS GNU_DUMMY_ATTRIBUTE
+#endif
+
 // Suppress ThreadSanitizer for a function with false positives
 #undef TSAN_SUPPRESS
-#if !defined(USE_SANITIZE_FULL) && defined(__SANITIZE_THREAD__) && GNU_ATTRIBUTE(__no_sanitize__)
+#if defined(__SANITIZE_THREAD__) && GNU_ATTRIBUTE(__no_sanitize__)
 #define TSAN_SUPPRESS __attribute__((__no_sanitize__("thread")))
 #else
 #define TSAN_SUPPRESS GNU_DUMMY_ATTRIBUTE
@@ -555,7 +574,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // Suppress MemorySanitizer for a function with false positives
 #undef MSAN_SUPPRESS
-#if !defined(USE_SANITIZE_FULL) && defined(__SANITIZE_MEMORY__) && GNU_ATTRIBUTE(__no_sanitize__)
+#if defined(__SANITIZE_MEMORY__) && GNU_ATTRIBUTE(__no_sanitize__)
 #define MSAN_SUPPRESS __attribute__((__no_sanitize__("memory")))
 #else
 #define MSAN_SUPPRESS GNU_DUMMY_ATTRIBUTE

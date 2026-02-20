@@ -7,7 +7,7 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 */
 
-#include "feature_test.h"
+#include "feature_test.h" // IWYU pragma: keep
 
 #include "elf_load.h"
 #include "mem_ops.h"
@@ -41,7 +41,77 @@ static spinlock_t    eventloop_lock   = ZERO_INIT;
 static cond_var_t*   eventloop_cond   = NULL;
 static thread_ctx_t* eventloop_thread = NULL;
 
-static inline char* rvvm_merge_strings_internal(const char* str1, const char* str2)
+void rvvm_append_isa_string(rvvm_machine_t* machine, const char* str)
+{
+#if defined(USE_FDT)
+    vector_foreach (machine->harts, i) {
+        struct fdt_node* cpus = fdt_node_find(rvvm_get_fdt_root(machine), "cpus");
+        struct fdt_node* cpu  = fdt_node_find_reg(cpus, "cpu", i);
+        // Get previous riscv,isa
+        char*  isa_str = fdt_node_get_prop_data(cpu, "riscv,isa");
+        size_t isa_len = isa_str ? rvvm_strlen(isa_str) : 0;
+        if (isa_str && rvvm_strfind(isa_str, str)) {
+            // String already present
+            return;
+        }
+        // Append riscv,isa
+        size_t str_len = rvvm_strlen(str);
+        size_t new_len = isa_len + str_len;
+        char*  new_str = safe_new_arr(char, new_len + 1);
+        if (isa_str) {
+            memcpy(new_str, isa_str, isa_len);
+        }
+        memcpy(new_str + isa_len, str, str_len);
+        // Extract riscv,isa-base
+        char   base[16] = "rv64i";
+        size_t base_len = ((size_t)rvvm_strfind(new_str, "i")) - ((size_t)new_str) + 1;
+        if (base_len < sizeof(base)) {
+            rvvm_strlcpy(base, new_str, base_len + 1);
+        } else {
+            // Fallback parsing
+            base_len = rvvm_strlen(base);
+        }
+        // Extract riscv,isa-extensions
+        size_t ext_let = ((size_t)rvvm_strfind(new_str, "_")) - ((size_t)new_str);
+        size_t ext_len = 0;
+        char*  ext_str = safe_new_arr(char, new_len + EVAL_MIN(ext_let, new_len) + 1);
+        for (size_t n = base_len - 1; n < new_len; ++n) {
+            if (new_str[n] == '_') {
+                size_t rem_len = new_len - n - 1;
+                memcpy(ext_str + ext_len, new_str + n + 1, rem_len);
+                for (size_t e = 0; e < rem_len; ++e) {
+                    if (ext_str[ext_len + e] == '_') {
+                        ext_str[ext_len + e] = 0;
+                    }
+                }
+                ext_len += rem_len;
+                break;
+            } else {
+                ext_str[ext_len]  = new_str[n];
+                ext_len          += 2;
+            }
+        }
+        // Pass new strings to fdt
+        fdt_node_add_prop(cpu, "riscv,isa", new_str, new_len + 1);
+        fdt_node_add_prop(cpu, "riscv,isa-base", base, base_len + 1);
+        fdt_node_add_prop(cpu, "riscv,isa-extensions", ext_str, ext_len + 1);
+        safe_free(new_str);
+        safe_free(ext_str);
+    }
+#else
+    UNUSED(machine);
+    UNUSED(str);
+#endif
+}
+
+#if defined(USE_FDT)
+
+static const char* riscv_exts
+    = "c_zic64b_zicbom_zicbop_zicboz_ziccamoa_ziccif_zicclsm_ziccrse_zicntr_zicond_zicsr_zifencei_zihintntl_"
+      "zihintpause_zimop_zmmul_za64rs_zaamo_zabha_zacas_zalrsc_zawrs_zfa_zca_zcb_zcd_zcmop_zba_zbb_zbc_zbs_zkr_"
+      "smcsrind_ssccptr_sscounterenw_sscsrind_sstc_sstvala_sstvecd_ssstrict_ssu64xl_svpbmt_svvptc_svadu_svbare";
+
+static char* rvvm_merge_strings_internal(const char* str1, const char* str2)
 {
     size_t str1_len = str1 ? rvvm_strlen(str1) : 0;
     size_t str2_len = str2 ? rvvm_strlen(str2) : 0;
@@ -54,25 +124,6 @@ static inline char* rvvm_merge_strings_internal(const char* str1, const char* st
     }
     return ret;
 }
-
-void rvvm_append_isa_string(rvvm_machine_t* machine, const char* str)
-{
-#if defined(USE_FDT)
-    vector_foreach (machine->harts, i) {
-        struct fdt_node* cpus = fdt_node_find(rvvm_get_fdt_root(machine), "cpus");
-        struct fdt_node* cpu  = fdt_node_find_reg(cpus, "cpu", i);
-        char*            isa  = fdt_node_get_prop_data(cpu, "riscv,isa");
-        char* new             = rvvm_merge_strings_internal(isa, str);
-        fdt_node_add_prop_str(cpu, "riscv,isa", new);
-        free(new);
-    }
-#else
-    UNUSED(machine);
-    UNUSED(str);
-#endif
-}
-
-#if defined(USE_FDT)
 
 static void rvvm_init_fdt(rvvm_machine_t* machine)
 {
@@ -113,25 +164,18 @@ static void rvvm_init_fdt(rvvm_machine_t* machine)
         fdt_node_add_prop_u32(cpu, "reg", i);
         fdt_node_add_prop(cpu, "compatible", "lekkit,rvvm\0riscv\0", 18);
         fdt_node_add_prop_u32(cpu, "clock-frequency", 3000000000);
+        fdt_node_add_prop_u32(cpu, "riscv,cbop-block-size", 64);
         fdt_node_add_prop_u32(cpu, "riscv,cboz-block-size", 64);
         fdt_node_add_prop_u32(cpu, "riscv,cbom-block-size", 64);
         if (vector_at(machine->harts, i)->rv64) {
-#if defined(USE_FPU)
-            fdt_node_add_prop_str(cpu, "riscv,isa",
-                                  "rv64imafdcb_zicsr_zifencei_zcb_zba_zbb_zbc_zbs_zkr_zicboz_zicbom_svadu_sstc");
-#else
-            fdt_node_add_prop_str(cpu, "riscv,isa",
-                                  "rv64imacb_zicsr_zifencei_zcb_zba_zbb_zbc_zbs_zkr_zicboz_zicbom_svadu_sstc");
-#endif
+            fdt_node_add_prop_str(cpu, "riscv,isa", "rv64ima");
+            fdt_node_add_prop_str(cpu, "riscv,isa-base", "rv64i");
+            fdt_node_add_prop(cpu, "riscv,isa-extensions", NULL, 0);
             fdt_node_add_prop_str(cpu, "mmu-type", "riscv,sv39");
         } else {
-#if defined(USE_FPU)
-            fdt_node_add_prop_str(cpu, "riscv,isa",
-                                  "rv32imafdcb_zicsr_zifencei_zcb_zba_zbb_zbc_zbs_zkr_zicboz_zicbom_svadu_sstc");
-#else
-            fdt_node_add_prop_str(cpu, "riscv,isa",
-                                  "rv32imacb_zicsr_zifencei_zcb_zba_zbb_zbc_zbs_zkr_zicboz_zicbom_svadu_sstc");
-#endif
+            fdt_node_add_prop_str(cpu, "riscv,isa", "rv32ima");
+            fdt_node_add_prop_str(cpu, "riscv,isa-base", "rv32i");
+            fdt_node_add_prop(cpu, "riscv,isa-extensions", NULL, 0);
             fdt_node_add_prop_str(cpu, "mmu-type", "riscv,sv32");
         }
 
@@ -162,6 +206,12 @@ static void rvvm_init_fdt(rvvm_machine_t* machine)
     fdt_node_add_prop(soc, "ranges", NULL, 0);
     fdt_node_add_child(machine->fdt, soc);
     machine->fdt_soc = soc;
+
+    // ISA string
+#if defined(USE_FPU)
+    rvvm_append_isa_string(machine, "fd");
+#endif
+    rvvm_append_isa_string(machine, riscv_exts);
 }
 
 static void rvvm_prepare_fdt(rvvm_machine_t* machine)
@@ -266,7 +316,6 @@ static void rvvm_reset_machine_state(rvvm_machine_t* machine)
     atomic_store_uint32(&machine->power_state, RVVM_POWER_ON);
 }
 
-// NOTE: Must be called under global_lock!
 static bool rvvm_eventloop_tick(bool manual)
 {
     bool ret = false;
@@ -282,6 +331,9 @@ static bool rvvm_eventloop_tick(bool manual)
         if (power_state == RVVM_POWER_ON) {
             vector_foreach (machine->harts, i) {
                 rvvm_hart_t* vm = vector_at(machine->harts, i);
+#if defined(USE_THREAD_EMU)
+                riscv_hart_run(vector_at(machine->harts, i));
+#endif
                 // Сheck hart timer interrupts
                 riscv_hart_check_timer(vector_at(machine->harts, i));
                 if (rvvm_get_opt(machine, RVVM_OPT_MAX_CPU_CENT) < 100) {
@@ -355,7 +407,11 @@ static void* rvvm_eventloop(void* manual)
     }
 
     while (running) {
-        if (rvtimecmp_pending(&cmp) || condvar_wait_ns(eventloop_cond, rvtimecmp_delay_ns(&cmp))) {
+        bool tick = rvtimecmp_pending(&cmp);
+        if (!tick) {
+            tick = condvar_wait_ns(eventloop_cond, rvtimecmp_delay_ns(&cmp));
+        }
+        if (tick) {
             uint64_t next = rvtimecmp_get(&cmp) + delay;
             uint64_t time = rvtimer_get(&timer);
             rvtimecmp_set(&cmp, EVAL_MAX(time, next));
