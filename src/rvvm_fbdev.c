@@ -115,6 +115,11 @@ RVVM_PUBLIC void* rvvm_fbdev_get_display_data(rvvm_fbdev_t* fbdev)
     return fbdev ? fbdev->display_data : NULL;
 }
 
+RVVM_PUBLIC bool rvvm_fbdev_is_headless(rvvm_fbdev_t* fbdev)
+{
+    return !fbdev || !fbdev->display_cb;
+}
+
 RVVM_PUBLIC bool rvvm_fbdev_set_vram(rvvm_fbdev_t* fbdev, void* vram, size_t size)
 {
     if (fbdev) {

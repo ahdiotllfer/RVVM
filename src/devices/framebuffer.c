@@ -11,6 +11,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include "compiler.h"
 #include "fdtlib.h"
 
+#include <string.h>
+
 PUSH_OPTIMIZATION_SIZE
 
 static bool simplefb_write(rvvm_mmio_dev_t* dev, void* data, size_t offset, uint8_t size)
@@ -35,10 +37,89 @@ static void simplefb_update(rvvm_mmio_dev_t* dev)
     rvvm_fbdev_update(fbdev);
 }
 
+static void simplefb_suspend(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    if (!dev || !state) {
+        return;
+    }
+    if (!dev->size) {
+        rvvm_state_fail(state);
+        return;
+    }
+    if (dev->size < 4) {
+        if (!dev->mapping) {
+            rvvm_state_fail(state);
+            return;
+        }
+        rvvm_state_write(state, dev->mapping, dev->size);
+        return;
+    }
+
+    rvvm_fbdev_t* fbdev = dev->data;
+    const bool headless = rvvm_fbdev_is_headless(fbdev);
+    const char hdr[4] = {'R', 'V', 'F', 'B'};
+    rvvm_state_write(state, hdr, sizeof(hdr));
+    rvvm_state_write_u32(state, headless ? 0U : 1U);
+    if (headless) {
+        return;
+    }
+    if (!dev->mapping) {
+        rvvm_state_fail(state);
+        return;
+    }
+    rvvm_state_write(state, dev->mapping, dev->size);
+}
+
+static void simplefb_resume(rvvm_mmio_dev_t* dev, rvvm_state_t* state)
+{
+    if (!dev || !state) {
+        return;
+    }
+    if (!dev->size) {
+        rvvm_state_fail(state);
+        return;
+    }
+    if (dev->size < 4) {
+        if (!dev->mapping) {
+            rvvm_state_fail(state);
+            return;
+        }
+        rvvm_state_read(state, dev->mapping, dev->size);
+        rvvm_fbdev_dirty((rvvm_fbdev_t*)dev->data);
+        return;
+    }
+
+    char hdr[4] = {0};
+    rvvm_state_read(state, hdr, sizeof(hdr));
+    if (memcmp(hdr, "RVFB", 4) == 0) {
+        uint32_t has_data = 0;
+        rvvm_state_read_u32(state, &has_data);
+        if (has_data) {
+            if (!dev->mapping) {
+                rvvm_state_fail(state);
+                return;
+            }
+            rvvm_state_read(state, dev->mapping, dev->size);
+        }
+        rvvm_fbdev_dirty((rvvm_fbdev_t*)dev->data);
+        return;
+    }
+
+    if (!dev->mapping) {
+        rvvm_state_fail(state);
+        return;
+    }
+    memcpy(dev->mapping, hdr, sizeof(hdr));
+    rvvm_state_read(state, ((uint8_t*)dev->mapping) + sizeof(hdr), dev->size - sizeof(hdr));
+    rvvm_fbdev_dirty((rvvm_fbdev_t*)dev->data);
+}
+
 static rvvm_mmio_type_t simplefb_dev_type = {
     .name   = "simple-framebuffer",
     .remove = simplefb_remove,
     .update = simplefb_update,
+    .suspend = simplefb_suspend,
+    .resume  = simplefb_resume,
 };
 
 PUBLIC rvvm_mmio_dev_t* rvvm_simplefb_init(rvvm_machine_t* machine, rvvm_addr_t addr, rvvm_fbdev_t* fbdev)
