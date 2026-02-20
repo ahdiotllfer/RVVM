@@ -28,31 +28,15 @@ typedef struct hid_mouse    hid_mouse_t;
 //! \warning After rvvm_machine_free(), keyboard handle is no longer valid
 PUBLIC hid_keyboard_t* hid_keyboard_init_auto(rvvm_machine_t* machine);
 
-PUBLIC hid_keyboard_t* hid_keyboard_init_auto_ps2(rvvm_machine_t* machine);
-
-PUBLIC hid_keyboard_t* hid_keyboard_init_auto_virtio(rvvm_machine_t* machine);
-
 //! \brief   Attach a HID mouse to the machine
 //! \warning After rvvm_machine_free(), mouse handle is no longer valid
 PUBLIC hid_mouse_t*    hid_mouse_init_auto(rvvm_machine_t* machine);
-
-PUBLIC hid_mouse_t*    hid_mouse_init_auto_ps2(rvvm_machine_t* machine);
-
-PUBLIC hid_mouse_t*    hid_mouse_init_auto_virtio(rvvm_machine_t* machine);
 
 //! \brief Press a keyboard key
 PUBLIC void hid_keyboard_press(hid_keyboard_t* kb, hid_key_t key);
 
 //! \brief Release a keyboard key
 PUBLIC void hid_keyboard_release(hid_keyboard_t* kb, hid_key_t key);
-
-PUBLIC void hid_keyboard_press_ps2(hid_keyboard_t* kb, hid_key_t key);
-
-PUBLIC void hid_keyboard_release_ps2(hid_keyboard_t* kb, hid_key_t key);
-
-PUBLIC void hid_keyboard_press_virtio(hid_keyboard_t* kb, hid_key_t key);
-
-PUBLIC void hid_keyboard_release_virtio(hid_keyboard_t* kb, hid_key_t key);
 
 //! \brief Press mouse buttons
 PUBLIC void hid_mouse_press(hid_mouse_t* mouse, hid_btns_t btns);
@@ -72,30 +56,6 @@ PUBLIC void hid_mouse_move(hid_mouse_t* mouse, int32_t x, int32_t y);
 //! \brief   Absolute mouse movement (Tablet mode for host cursor integration)
 //! \warning Set tablet resolution with hid_mouse_resolution() beforehand
 PUBLIC void hid_mouse_place(hid_mouse_t* mouse, int32_t x, int32_t y);
-
-PUBLIC void hid_mouse_press_ps2(hid_mouse_t* mouse, hid_btns_t btns);
-
-PUBLIC void hid_mouse_release_ps2(hid_mouse_t* mouse, hid_btns_t btns);
-
-PUBLIC void hid_mouse_scroll_ps2(hid_mouse_t* mouse, int32_t offset);
-
-PUBLIC void hid_mouse_resolution_ps2(hid_mouse_t* mouse, uint32_t x, uint32_t y);
-
-PUBLIC void hid_mouse_move_ps2(hid_mouse_t* mouse, int32_t x, int32_t y);
-
-PUBLIC void hid_mouse_place_ps2(hid_mouse_t* mouse, int32_t x, int32_t y);
-
-PUBLIC void hid_mouse_press_virtio(hid_mouse_t* mouse, hid_btns_t btns);
-
-PUBLIC void hid_mouse_release_virtio(hid_mouse_t* mouse, hid_btns_t btns);
-
-PUBLIC void hid_mouse_scroll_virtio(hid_mouse_t* mouse, int32_t offset);
-
-PUBLIC void hid_mouse_resolution_virtio(hid_mouse_t* mouse, uint32_t x, uint32_t y);
-
-PUBLIC void hid_mouse_move_virtio(hid_mouse_t* mouse, int32_t x, int32_t y);
-
-PUBLIC void hid_mouse_place_virtio(hid_mouse_t* mouse, int32_t x, int32_t y);
 
 /*
  * Mouse definitions

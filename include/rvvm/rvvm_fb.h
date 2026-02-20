@@ -311,8 +311,6 @@ RVVM_PUBLIC void rvvm_fbdev_set_display_data(rvvm_fbdev_t* fbdev, void* data);
  */
 RVVM_PUBLIC void* rvvm_fbdev_get_display_data(rvvm_fbdev_t* fbdev);
 
-RVVM_PUBLIC bool rvvm_fbdev_is_headless(rvvm_fbdev_t* fbdev);
-
 /**
  * Set fbdev video RAM buffer & size. Must be done before passing fbdev to the GPU device.
  */

@@ -16,11 +16,6 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 PUSH_OPTIMIZATION_SIZE
 
-__attribute__((weak)) bool virtio_fs_hostfs_enabled(void)
-{
-    return false;
-}
-
 // Do not isolate under sanitizers to prevent breakage
 #if !defined(SANITIZERS_ENABLED)
 
@@ -863,9 +858,6 @@ static void restrict_process_once(void)
 
 void rvvm_restrict_this_thread(void)
 {
-    if (virtio_fs_hostfs_enabled()) {
-        return;
-    }
 #if defined(ISOLATION_DROP_ROOT_IMPL)
     drop_root_user();
 #endif
@@ -880,9 +872,6 @@ void rvvm_restrict_this_thread(void)
 
 PUBLIC void rvvm_restrict_process(void)
 {
-    if (virtio_fs_hostfs_enabled()) {
-        return;
-    }
     DO_ONCE(restrict_process_once());
 }
 

@@ -79,22 +79,12 @@ enum {
 
 __attribute__((weak)) void rvvm_ios_virtiofs_debug_print(const char* s)
 {
-    if (!s) {
-        return;
-    }
-    size_t n = strlen(s);
-    if (n && s[n - 1] == '\n') {
-        fputs(s, stderr);
-    } else {
-        fputs(s, stderr);
-        fputc('\n', stderr);
-    }
-    fflush(stderr);
+    UNUSED(s);
 }
 
 static void virtio_fs_uart_printf(const char* fmt, ...)
 {
-    static uint32_t budget = 200000;
+    static uint32_t budget = 2048;
     if (budget == 0) {
         return;
     }
@@ -105,13 +95,6 @@ static void virtio_fs_uart_printf(const char* fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     rvvm_ios_virtiofs_debug_print(buf);
-}
-
-static bool virtio_fs_hostfs_active = false;
-
-bool virtio_fs_hostfs_enabled(void)
-{
-    return virtio_fs_hostfs_active;
 }
 
 enum {
@@ -341,59 +324,6 @@ static char* path_join2(const char* base, const char* name)
     memcpy(out + o, name, nl);
     out[out_len] = 0;
     return out;
-}
-
-static int vfs_lstat(const char* path, struct stat* st)
-{
-    if (!path || !st) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (lstat(path, st) == 0) {
-        return 0;
-    }
-    int err_lstat = errno;
-
-#if defined(AT_FDCWD) && defined(AT_SYMLINK_NOFOLLOW)
-    if (fstatat(AT_FDCWD, path, st, AT_SYMLINK_NOFOLLOW) == 0) {
-        return 0;
-    }
-    int err_fstatat = errno;
-#else
-    int err_fstatat = ENOSYS;
-#endif
-
-    if (err_lstat == ENOSYS || err_fstatat == ENOSYS) {
-        if (stat(path, st) == 0) {
-            return 0;
-        }
-    }
-
-    int err_stat = errno;
-
-    int err_open = ENOSYS;
-    int err_fstat = ENOSYS;
-    int fd = open(path, O_RDONLY);
-    if (fd >= 0) {
-        if (fstat(fd, st) == 0) {
-            close(fd);
-            return 0;
-        }
-        err_fstat = errno;
-        close(fd);
-    } else {
-        err_open = errno;
-    }
-
-    virtio_fs_uart_printf("virtio-fs: vfs_lstat failed path=%s lstat=%d fstatat=%d stat=%d open=%d fstat=%d errno=%d\n",
-                          path,
-                          err_lstat,
-                          err_fstatat,
-                          err_stat,
-                          err_open,
-                          err_fstat,
-                          errno);
-    return -1;
 }
 
 static const char* inode_to_path(virtio_fs_dev_t* vfs, uint64_t nodeid)
@@ -819,7 +749,7 @@ static uint32_t fill_dirents(virtio_fs_dev_t* vfs, uint8_t* out, uint32_t cap, D
             char* full = path_join2(dir_path, name);
             if (full) {
                 struct stat st;
-                if (vfs_lstat(full, &st) == 0) {
+                if (lstat(full, &st) == 0) {
                     if (dtype == 0) {
                         dtype = mode_to_dt(st.st_mode);
                     }
@@ -851,140 +781,6 @@ static uint32_t fill_dirents(virtio_fs_dev_t* vfs, uint8_t* out, uint32_t cap, D
     return written;
 }
 
-static uint32_t fill_direntsplus(virtio_fs_dev_t* vfs, uint8_t* out, uint32_t cap, DIR* dir, uint64_t dir_nodeid, const char* dir_path, uint64_t off)
-{
-    uint32_t written = 0;
-    if (!dir || !dir_path) {
-        return 0;
-    }
-
-    if (off == 0) {
-        rewinddir(dir);
-    } else {
-        seekdir(dir, (long)off);
-    }
-
-    struct dirent* ent;
-    while ((ent = readdir(dir)) != NULL) {
-        const char* name = ent->d_name;
-        if (!is_safe_name(name) && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-            continue;
-        }
-
-        const char* full_path = NULL;
-        char* full_alloc = NULL;
-        uint64_t ino = 0;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-            ino = dir_nodeid;
-            full_path = dir_path;
-        } else {
-            full_alloc = path_join2(dir_path, name);
-            if (!full_alloc) {
-                continue;
-            }
-            full_path = full_alloc;
-            ino = ensure_inode_for_path(vfs, full_alloc);
-            if (ino == 0) {
-                ino = (uint64_t)ent->d_ino;
-            }
-        }
-
-        struct stat st;
-        if (!full_path || vfs_lstat(full_path, &st) != 0) {
-            free(full_alloc);
-            continue;
-        }
-
-        uint32_t name_len = (uint32_t)strlen(name);
-        uint32_t entry_len = 40 + 88;
-        uint32_t dirent_len = align8(24 + name_len);
-        uint32_t rec_len = align8(entry_len + dirent_len);
-        if (written + rec_len > cap) {
-            free(full_alloc);
-            break;
-        }
-
-        uint8_t* p = out + written;
-        uint32_t payload = fill_entry_out(p, ino, &st);
-        if (payload != entry_len) {
-            free(full_alloc);
-            break;
-        }
-
-        long next_off_l = telldir(dir);
-        uint64_t next_off = (next_off_l > 0) ? (uint64_t)next_off_l : (off + 1);
-
-        uint8_t* d = p + entry_len;
-        uint32_t dtype = (uint32_t)ent->d_type;
-        if (dtype == 0) {
-            dtype = mode_to_dt(st.st_mode);
-        }
-        write_uint64_le(d + 0, ino);
-        write_uint64_le(d + 8, next_off);
-        write_uint32_le(d + 16, name_len);
-        write_uint32_le(d + 20, dtype);
-        memcpy(d + 24, name, name_len);
-        memset(d + 24 + name_len, 0, dirent_len - (24 + name_len));
-        if (rec_len > entry_len + dirent_len) {
-            memset(d + dirent_len, 0, rec_len - (entry_len + dirent_len));
-        }
-
-        written += rec_len;
-        off = next_off;
-        free(full_alloc);
-    }
-    return written;
-}
-
-static const char* fuse_opcode_name(uint32_t opcode)
-{
-    switch (opcode) {
-        case FUSE_LOOKUP: return "LOOKUP";
-        case FUSE_FORGET: return "FORGET";
-        case FUSE_GETATTR: return "GETATTR";
-        case FUSE_SETATTR: return "SETATTR";
-        case FUSE_READLINK: return "READLINK";
-        case FUSE_SYMLINK: return "SYMLINK";
-        case FUSE_MKNOD: return "MKNOD";
-        case FUSE_MKDIR: return "MKDIR";
-        case FUSE_UNLINK: return "UNLINK";
-        case FUSE_RMDIR: return "RMDIR";
-        case FUSE_RENAME: return "RENAME";
-        case FUSE_LINK: return "LINK";
-        case FUSE_OPEN: return "OPEN";
-        case FUSE_READ: return "READ";
-        case FUSE_WRITE: return "WRITE";
-        case FUSE_STATFS: return "STATFS";
-        case FUSE_RELEASE: return "RELEASE";
-        case FUSE_FSYNC: return "FSYNC";
-        case FUSE_SETXATTR: return "SETXATTR";
-        case FUSE_GETXATTR: return "GETXATTR";
-        case FUSE_LISTXATTR: return "LISTXATTR";
-        case FUSE_REMOVEXATTR: return "REMOVEXATTR";
-        case FUSE_FLUSH: return "FLUSH";
-        case FUSE_INIT: return "INIT";
-        case FUSE_OPENDIR: return "OPENDIR";
-        case FUSE_READDIR: return "READDIR";
-        case FUSE_RELEASEDIR: return "RELEASEDIR";
-        case FUSE_FSYNC_DIR: return "FSYNC_DIR";
-        case FUSE_GETLK: return "GETLK";
-        case FUSE_SETLK: return "SETLK";
-        case FUSE_SETLKW: return "SETLKW";
-        case FUSE_ACCESS: return "ACCESS";
-        case FUSE_CREATE: return "CREATE";
-        case FUSE_INTERRUPT: return "INTERRUPT";
-        case FUSE_BMAP: return "BMAP";
-        case FUSE_DESTROY: return "DESTROY";
-        case FUSE_IOCTL: return "IOCTL";
-        case FUSE_POLL: return "POLL";
-        case FUSE_NOTIFY_REPLY: return "NOTIFY_REPLY";
-        case FUSE_BATCH_FORGET: return "BATCH_FORGET";
-        case FUSE_FALLOCATE: return "FALLOCATE";
-        case FUSE_READDIRPLUS: return "READDIRPLUS";
-        default: return "UNKNOWN";
-    }
-}
-
 static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, size_t req_len, uint8_t* resp, size_t resp_cap)
 {
     fuse_in_hdr_fields_t in;
@@ -995,15 +791,11 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
     uint32_t out_len = 16;
     int32_t out_err = 0;
 
-    virtio_fs_uart_printf("virtio-fs: req op=%u(%s) node=%llu uniq=%llu len=%u uid=%u gid=%u pid=%u\n",
+    virtio_fs_uart_printf("virtio-fs: op=%u node=%llu uniq=%llu len=%u\n",
                           (unsigned)in.opcode,
-                          fuse_opcode_name(in.opcode),
                           (unsigned long long)in.nodeid,
                           (unsigned long long)in.unique,
-                          (unsigned)in.len,
-                          (unsigned)in.uid,
-                          (unsigned)in.gid,
-                          (unsigned)in.pid);
+                          (unsigned)in.len);
 
     switch (in.opcode) {
         case FUSE_INIT: {
@@ -1058,7 +850,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 free(full);
                 out_err = -errno;
                 out_len = 16;
@@ -1087,7 +879,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(path, &st) != 0) {
+            if (lstat(path, &st) != 0) {
                 out_err = -errno;
                 out_len = 16;
                 break;
@@ -1154,7 +946,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
             }
             if (valid & (FUSE_SETATTR_ATIME | FUSE_SETATTR_MTIME | FUSE_SETATTR_ATIME_NOW | FUSE_SETATTR_MTIME_NOW)) {
                 struct stat st0;
-                if (vfs_lstat(path, &st0) != 0) {
+                if (lstat(path, &st0) != 0) {
                     out_err = -errno;
                     out_len = 16;
                     break;
@@ -1195,7 +987,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
             }
 
             struct stat st;
-            if (vfs_lstat(path, &st) != 0) {
+            if (lstat(path, &st) != 0) {
                 out_err = -errno;
                 out_len = 16;
                 break;
@@ -1269,7 +1061,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 out_err = -errno;
                 free(full);
                 out_len = 16;
@@ -1329,7 +1121,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 out_err = -errno;
                 free(full);
                 out_len = 16;
@@ -1392,7 +1184,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 out_err = -errno;
                 free(full);
                 out_len = 16;
@@ -1466,44 +1258,6 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
             out_len = 16;
             break;
         }
-        case FUSE_SETXATTR:
-        case FUSE_REMOVEXATTR:
-        case FUSE_FALLOCATE:
-        case FUSE_GETLK:
-        case FUSE_SETLK:
-        case FUSE_SETLKW:
-        case FUSE_BMAP:
-        case FUSE_IOCTL:
-        case FUSE_POLL:
-        case FUSE_NOTIFY_REPLY: {
-            out_err = -EOPNOTSUPP;
-            out_len = 16;
-            break;
-        }
-        case FUSE_GETXATTR:
-        case FUSE_LISTXATTR: {
-            if (req_len < 40 + 8) {
-                out_err = -EINVAL;
-                out_len = 16;
-                break;
-            }
-            uint32_t size = read_uint32_le(req + 40);
-            if (size == 0) {
-                if (resp_cap < 16 + 8) {
-                    return 0;
-                }
-                memset(resp + 16, 0, 8);
-                out_len = 16 + 8;
-                break;
-            }
-            out_err = -ENODATA;
-            out_len = 16;
-            break;
-        }
-        case FUSE_BATCH_FORGET: {
-            out_len = 16;
-            break;
-        }
         case FUSE_OPENDIR: {
             const char* path = inode_to_path(vfs, in.nodeid);
             if (!path) {
@@ -1564,40 +1318,6 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
             }
             uint32_t written = fill_dirents(vfs, resp + 16, size, h->u.dir, in.nodeid, dir_path, offset);
             virtio_fs_uart_printf("virtio-fs: readdir node=%llu fh=%llu off=%llu size=%u -> %u\n",
-                                  (unsigned long long)in.nodeid,
-                                  (unsigned long long)fh,
-                                  (unsigned long long)offset,
-                                  (unsigned)size,
-                                  (unsigned)written);
-            out_len = 16 + written;
-            break;
-        }
-        case FUSE_READDIRPLUS: {
-            if (req_len < 40 + 40) {
-                out_err = -EINVAL;
-                out_len = 16;
-                break;
-            }
-            uint64_t fh = read_uint64_le(req + 40);
-            uint64_t offset = read_uint64_le(req + 48);
-            uint32_t size = read_uint32_le(req + 56);
-            virtio_fs_handle_t* h = (virtio_fs_handle_t*)hashmap_get_ptr(&vfs->fh_to_handle, (size_t)fh);
-            if (!h || !h->is_dir) {
-                out_err = -EBADF;
-                out_len = 16;
-                break;
-            }
-            if (size > resp_cap - 16) {
-                size = (uint32_t)(resp_cap - 16);
-            }
-            const char* dir_path = inode_to_path(vfs, in.nodeid);
-            if (!dir_path) {
-                out_err = -ENOENT;
-                out_len = 16;
-                break;
-            }
-            uint32_t written = fill_direntsplus(vfs, resp + 16, size, h->u.dir, in.nodeid, dir_path, offset);
-            virtio_fs_uart_printf("virtio-fs: readdirplus node=%llu fh=%llu off=%llu size=%u -> %u\n",
                                   (unsigned long long)in.nodeid,
                                   (unsigned long long)fh,
                                   (unsigned long long)offset,
@@ -1747,7 +1467,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 out_err = -errno;
                 close(fd);
                 free(full);
@@ -1820,7 +1540,7 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
                 break;
             }
             struct stat st;
-            if (vfs_lstat(full, &st) != 0) {
+            if (lstat(full, &st) != 0) {
                 out_err = -errno;
                 free(full);
                 out_len = 16;
@@ -1994,9 +1714,6 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
         default: {
             out_err = -ENOSYS;
             out_len = 16;
-            virtio_fs_uart_printf("virtio-fs: unhandled opcode=%u(%s)\n",
-                                  (unsigned)in.opcode,
-                                  fuse_opcode_name(in.opcode));
             break;
         }
     }
@@ -2004,12 +1721,6 @@ static uint32_t fuse_handle_request(virtio_fs_dev_t* vfs, const uint8_t* req, si
     if (out_len > resp_cap) {
         out_len = (uint32_t)resp_cap;
     }
-    virtio_fs_uart_printf("virtio-fs: resp uniq=%llu op=%u(%s) err=%d len=%u\n",
-                          (unsigned long long)in.unique,
-                          (unsigned)in.opcode,
-                          fuse_opcode_name(in.opcode),
-                          (int)out_err,
-                          (unsigned)out_len);
     write_out_header(resp, out_len, out_err, in.unique);
     return out_len;
 }
@@ -2625,7 +2336,6 @@ PUBLIC rvvm_mmio_dev_t* virtio_fs_init(rvvm_machine_t* machine, rvvm_addr_t addr
     if (stat(shared_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
         return NULL;
     }
-    virtio_fs_hostfs_active = true;
 
     virtio_fs_dev_t* vfs = safe_new_obj(virtio_fs_dev_t);
     vfs->machine = machine;

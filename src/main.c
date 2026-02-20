@@ -200,9 +200,6 @@ static void rvvm_print_help(void)
         "    -nvme       ...  Explicitly attach storage image as NVMe device\n"
         "    -ata        ...  Explicitly attach storage image as ATA (IDE) device\n"
         "    -virtio-fs  ...  Attach virtio-fs shared directory (tag: share)\n"
-        "    -snapshot   ...  Load snapshot at startup and save on exit\n"
-        "    -load       ...  Load snapshot at startup\n"
-        "    -save       ...  Save snapshot on exit\n"
         "    -nogui           Disable display GUI\n"
         "    -nosound         Disable sound support\n"
         "    -nonet           Disable networking\n"
@@ -309,20 +306,6 @@ static int rvvm_cli_main(int argc, char** argv)
     if (rvvm_has_arg("h") || rvvm_has_arg("help") || rvvm_has_arg("H")) {
         rvvm_print_help();
         return 0;
-    }
-
-    const char* snapshot_arg = rvvm_getarg("snapshot");
-    const char* load_snapshot = rvvm_getarg("load");
-    const char* save_snapshot = rvvm_getarg("save");
-    bool        load_optional = false;
-    if (snapshot_arg) {
-        if (!load_snapshot) {
-            load_snapshot = snapshot_arg;
-            load_optional = true;
-        }
-        if (!save_snapshot) {
-            save_snapshot = snapshot_arg;
-        }
     }
 
     // Default machine parameters: 1 core, 256M ram, riscv64, 640x480 screen
@@ -432,31 +415,7 @@ static int rvvm_cli_main(int argc, char** argv)
         rvvm_dump_fdt(machine, rvvm_getarg("dumpdtb"));
     }
 
-    if (load_snapshot) {
-        if (!rvvm_load_snapshot(machine, load_snapshot)) {
-            if (load_optional) {
-                rvvm_warn("Failed to load snapshot \"%s\", continuing boot", load_snapshot);
-            } else {
-                rvvm_error("Failed to load snapshot \"%s\"", load_snapshot);
-                rvvm_free_machine(machine);
-                return -1;
-            }
-        } else {
-            rvvm_info("Loaded snapshot \"%s\"", load_snapshot);
-        }
-    }
-
-    bool isolate = !rvvm_has_arg("noisolation");
-    if (isolate && save_snapshot) {
-        rvvm_warn("Snapshot saving requires filesystem access, disabling isolation");
-        isolate = false;
-    }
-    if (isolate && (rvvm_has_arg("virtio-fs") || rvvm_has_arg("virtio_fs"))) {
-        rvvm_warn("virtio-fs requires filesystem access, disabling isolation");
-        isolate = false;
-    }
-
-    if (isolate) {
+    if (!rvvm_has_arg("noisolation")) {
         // Preparations are done, isolate the process as much as possible
         rvvm_restrict_process();
     }
@@ -466,18 +425,8 @@ static int rvvm_cli_main(int argc, char** argv)
     // Returns on machine shutdown
     rvvm_run_eventloop();
 
-    int ret = 0;
-    if (save_snapshot) {
-        if (!rvvm_save_snapshot(machine, save_snapshot)) {
-            rvvm_error("Failed to save snapshot \"%s\"", save_snapshot);
-            ret = -1;
-        } else {
-            rvvm_info("Saved snapshot \"%s\"", save_snapshot);
-        }
-    }
-
     rvvm_free_machine(machine);
-    return ret;
+    return 0;
 }
 
 int main(int argc, char** argv)
